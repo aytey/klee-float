@@ -335,12 +335,55 @@ the multiplier abstraction at the same width restores baseline performance, so
 it is specifically `BVMULT`/`BVDIV`/`BVMOD` refinement that fails to converge on
 these queries. Equality abstraction alone changes nothing either way.
 
-So the work item is narrower and harder than "implement abstraction": the
-mechanism is there, and what it needs is a multiplier abstraction whose
-refinement converges on the wide products that floating-point blasting
-produces. Both figures above are one benchmark's 39 queries, so any tuning that
-does look promising should be checked against the wider set before it is
-believed.
+### The lemma catalogue is not what makes Bitwuzla's abstraction work
+
+Bitwuzla refines from a catalogue of algebraic lemma schemas — 19 for `BV_MUL`,
+37 for `BV_UDIV`, 15 for `BV_UREM` (`LemmaKind` in
+`src/solver/abstract/abstraction_lemmas.h`) — asserting facts true for *all*
+operand values, such as `x * s = s << log2(x)` when `x` is a power of two. STP
+has no equivalent: its only multiplier refinement is the value-blocking lemma
+`(a ≠ aBits) ∨ (b ≠ bBits) ∨ result = expected`, which excludes one point of a
+2^(2W) space and so cannot converge.
+
+That looks like the whole explanation, and it is not.
+`--abstraction-value-only` reduces Bitwuzla to exactly STP's strategy, and on
+this corpus it costs nothing. Round-robin over the 39 queries — every
+configuration run back to back on each query, so drift lands on all of them
+equally — three passes:
+
+| Configuration | pass 1 | pass 2 | pass 3 | total |
+| --- | --- | --- | --- | --- |
+| Bitwuzla, schemas (default) | 69.36 | 68.72 | 68.04 | 206.12s |
+| Bitwuzla, `--abstraction-value-only` | 65.61 | 70.15 | 69.94 | **205.70s** |
+| Bitwuzla, `--abstraction=false` | 91.42 | 99.10 | 93.40 | 283.92s |
+| STP + MiniSat | 86.02 | 85.25 | 81.28 | 252.55s |
+
+Schemas and value-only finish 0.2% apart. **The 28% that abstraction is worth
+here comes from the framework — abstract wide operations, refine lazily,
+escalate — not from the lemma catalogue.** Which sharpens the question rather
+than answering it, because STP has that framework and enabling it makes things
+worse. What differs is how the two spend it:
+
+* **Budget.** Bitwuzla allows `bv_size / abstraction_value_limit` value lemmas,
+  about 6 at 53 bits. STP allows a flat 32 whatever the width — five times more
+  fruitless SAT calls before it gives up.
+* **Escalation.** Bitwuzla emits a node-level lemma (`t = x op s`, optionally
+  over the low bits only) that re-enters its ordinary rewriting and
+  bit-blasting path. STP's `encodeMultiply`/`encodeDivMod` hand-emit a naive
+  shift-add array straight into the SAT solver as gates, bypassing STP's AIG
+  pipeline and ABC rewriting — so an abstraction STP gives up on ends up *worse
+  encoded* than one it never abstracted, the likeliest reason `rounds=1`
+  measured worse than baseline.
+
+So the work item is narrower than "implement abstraction": the mechanism is
+there, and what it needs is a cheaper way to spend it and to leave it — a
+smaller value budget, and an escalation that goes through the same encoder as
+an unabstracted term. Algebraic lemma schemas are the more interesting piece of
+engineering and may matter on harder multiplier queries, but on this corpus
+they are worth nothing over value-blocking, so they are not where to start.
+
+All of these figures are one benchmark's 39 queries, so anything that looks
+promising should be checked against the wider set before it is believed.
 
 ### How much of this is noise?
 
