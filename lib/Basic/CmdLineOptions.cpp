@@ -115,23 +115,36 @@ llvm::cl::opt<klee::MetaSMTBackendType> MetaSMTBackend(
 
 #endif /* ENABLE_METASMT */
 
-// Pick the default core solver based on configuration
-#ifdef ENABLE_STP
-#define STP_IS_DEFAULT_STR " (default)"
-#define METASMT_IS_DEFAULT_STR ""
-#define Z3_IS_DEFAULT_STR ""
-#define DEFAULT_CORE_SOLVER STP_SOLVER
-#elif ENABLE_Z3
+// Pick the default core solver based on configuration.
+//
+// Z3 is preferred over the others when it is available: this fork's
+// floating-point support was developed and published against Z3, so building
+// with an additional solver enabled must not silently change which one an
+// invocation without --solver-backend uses.
+#ifdef ENABLE_Z3
 #define STP_IS_DEFAULT_STR ""
 #define METASMT_IS_DEFAULT_STR ""
 #define Z3_IS_DEFAULT_STR " (default)"
+#define BITWUZLA_IS_DEFAULT_STR ""
 #define DEFAULT_CORE_SOLVER Z3_SOLVER
+#elif ENABLE_STP
+#define STP_IS_DEFAULT_STR " (default)"
+#define METASMT_IS_DEFAULT_STR ""
+#define Z3_IS_DEFAULT_STR ""
+#define BITWUZLA_IS_DEFAULT_STR ""
+#define DEFAULT_CORE_SOLVER STP_SOLVER
 #elif ENABLE_METASMT
 #define STP_IS_DEFAULT_STR ""
 #define METASMT_IS_DEFAULT_STR " (default)"
 #define Z3_IS_DEFAULT_STR ""
+#define BITWUZLA_IS_DEFAULT_STR ""
 #define DEFAULT_CORE_SOLVER METASMT_SOLVER
+#elif ENABLE_BITWUZLA
+#define STP_IS_DEFAULT_STR ""
+#define METASMT_IS_DEFAULT_STR ""
 #define Z3_IS_DEFAULT_STR ""
+#define BITWUZLA_IS_DEFAULT_STR " (default)"
+#define DEFAULT_CORE_SOLVER BITWUZLA_SOLVER
 #else
 #error "Unsupported solver configuration"
 #endif
@@ -141,6 +154,8 @@ llvm::cl::opt<CoreSolverType> CoreSolverToUse(
                      clEnumValN(METASMT_SOLVER, "metasmt", "metaSMT" METASMT_IS_DEFAULT_STR),
                      clEnumValN(DUMMY_SOLVER, "dummy", "Dummy solver"),
                      clEnumValN(Z3_SOLVER, "z3", "Z3" Z3_IS_DEFAULT_STR),
+                     clEnumValN(BITWUZLA_SOLVER, "bitwuzla",
+                                "Bitwuzla" BITWUZLA_IS_DEFAULT_STR),
                      clEnumValEnd),
     llvm::cl::init(DEFAULT_CORE_SOLVER));
 
@@ -152,11 +167,13 @@ llvm::cl::opt<CoreSolverType> DebugCrossCheckCoreSolverWith(
                      clEnumValN(METASMT_SOLVER, "metasmt", "metaSMT"),
                      clEnumValN(DUMMY_SOLVER, "dummy", "Dummy solver"),
                      clEnumValN(Z3_SOLVER, "z3", "Z3"),
+                     clEnumValN(BITWUZLA_SOLVER, "bitwuzla", "Bitwuzla"),
                      clEnumValN(NO_SOLVER, "none",
                                 "Do not cross check (default)"),
                      clEnumValEnd),
     llvm::cl::init(NO_SOLVER));
 }
+#undef BITWUZLA_IS_DEFAULT_STR
 #undef STP_IS_DEFAULT_STR
 #undef METASMT_IS_DEFAULT_STR
 #undef Z3_IS_DEFAULT_STR

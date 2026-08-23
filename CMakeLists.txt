@@ -352,6 +352,24 @@ else()
   set(ENABLE_Z3 0) # For config.h
 endif()
 
+# Bitwuzla
+option(ENABLE_SOLVER_BITWUZLA "Enable Bitwuzla solver support" OFF)
+if (ENABLE_SOLVER_BITWUZLA)
+  message(STATUS "Bitwuzla solver support enabled")
+  find_package(Bitwuzla)
+  if (Bitwuzla_FOUND)
+    message(STATUS "Found Bitwuzla")
+    set(ENABLE_BITWUZLA 1) # For config.h
+    list(APPEND KLEE_COMPONENT_EXTRA_INCLUDE_DIRS ${Bitwuzla_INCLUDE_DIRS})
+    list(APPEND KLEE_SOLVER_LIBRARIES ${Bitwuzla_LIBRARIES})
+  else()
+    message(FATAL_ERROR "Bitwuzla not found.")
+  endif()
+else()
+  message(STATUS "Bitwuzla solver support disabled")
+  set(ENABLE_BITWUZLA 0) # For config.h
+endif()
+
 # metaSMT
 option(ENABLE_SOLVER_METASMT "Enable metaSMT solver support" OFF)
 if (ENABLE_SOLVER_METASMT)
@@ -363,12 +381,14 @@ else()
   set(ENABLE_METASMT 0) # For config.h
 endif()
 
-if ((NOT ${ENABLE_Z3}) AND (NOT ${ENABLE_STP}) AND (NOT ${ENABLE_METASMT}))
+if ((NOT ${ENABLE_Z3}) AND (NOT ${ENABLE_STP}) AND (NOT ${ENABLE_METASMT})
+    AND (NOT ${ENABLE_BITWUZLA}))
   message(FATAL_ERROR "No solver was specified. At least one solver is required."
     "You should enable a solver by passing one of more the following options"
     " to cmake:\n"
     "\"-DENABLE_SOLVER_STP=ON\"\n"
     "\"-DENABLE_SOLVER_Z3=ON\"\n"
+    "\"-DENABLE_SOLVER_BITWUZLA=ON\"\n"
     "\"-DENABLE_SOLVER_METASMT=ON\"")
 endif()
 

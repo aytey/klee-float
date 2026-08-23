@@ -8,6 +8,8 @@
 #===------------------------------------------------------------------------===#
 klee_add_component(kleaverSolver
   AssignmentValidatingSolver.cpp
+  BitwuzlaBuilder.cpp
+  BitwuzlaSolver.cpp
   CachingSolver.cpp
   CexCachingSolver.cpp
   ConstantDivision.cpp

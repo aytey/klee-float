@@ -90,6 +90,14 @@ Solver *createCoreSolver(CoreSolverType cst) {
     klee_message("Not compiled with Z3 support");
     return NULL;
 #endif
+  case BITWUZLA_SOLVER:
+#ifdef ENABLE_BITWUZLA
+    klee_message("Using Bitwuzla solver backend");
+    return new BitwuzlaSolver();
+#else
+    klee_message("Not compiled with Bitwuzla support");
+    return NULL;
+#endif
   case NO_SOLVER:
     klee_message("Invalid solver");
     return NULL;

@@ -243,6 +243,23 @@ namespace klee {
   };
 #endif // ENABLE_Z3
 
+#ifdef ENABLE_BITWUZLA
+  /// BitwuzlaSolver - A complete solver based on Bitwuzla
+  class BitwuzlaSolver : public Solver {
+  public:
+    /// BitwuzlaSolver - Construct a new BitwuzlaSolver.
+    BitwuzlaSolver();
+
+    /// Get the query in SMT-LIBv2 format.
+    /// \return A C-style string. The caller is responsible for freeing this.
+    virtual char *getConstraintLog(const Query &);
+
+    /// setCoreSolverTimeout - Set constraint solver timeout delay to the given
+    /// value; 0 is off.
+    virtual void setCoreSolverTimeout(double timeout);
+  };
+#endif // ENABLE_BITWUZLA
+
 #ifdef ENABLE_METASMT
   
   template<typename SolverContext>
