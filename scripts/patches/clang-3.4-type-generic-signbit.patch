@@ -1,0 +1,37 @@
+Make __builtin_signbit type generic (backport for Clang 3.4)
+
+Clang 3.4 declares __builtin_signbit as int(double), so Sema promotes a float
+argument to double and demotes a long double one, before CodeGen ever sees it.
+glibc >= 2.32 defines signbit(x) as __builtin_signbit(x) for Clang >= 3.3, so
+every signbit() call on a non-double goes through that conversion.
+
+Under KLEE's SMT-LIB floating point semantics the conversion is not harmless:
+fpext of a NaN yields the canonical NaN, which has no sign, so signbit() of a
+negative NaN wrongly answers 0 and KLEE loses that path entirely.
+
+CGBuiltin.cpp already emits a width-generic bitcast+icmp, and
+SemaBuiltinFPClassification() already strips the float->double cast, so it is
+enough to declare the builtin with custom type checking like its __builtin_isnan
+siblings. This is the same fix LLVM made upstream after 3.4.
+
+--- a/tools/clang/include/clang/Basic/Builtins.def
++++ b/tools/clang/include/clang/Basic/Builtins.def
+@@ -371,7 +371,7 @@
+ BUILTIN(__builtin_isnormal,   "i.", "nc")
+ 
+ // FP signbit builtins
+-BUILTIN(__builtin_signbit, "id", "nc")
++BUILTIN(__builtin_signbit, "i.", "nc")
+ BUILTIN(__builtin_signbitf, "if", "nc")
+ BUILTIN(__builtin_signbitl, "iLd", "nc")
+ 
+--- a/tools/clang/lib/Sema/SemaChecking.cpp
++++ b/tools/clang/lib/Sema/SemaChecking.cpp
+@@ -163,6 +163,7 @@
+   case Builtin::BI__builtin_isinf_sign:
+   case Builtin::BI__builtin_isnan:
+   case Builtin::BI__builtin_isnormal:
++  case Builtin::BI__builtin_signbit:
+     if (SemaBuiltinFPClassification(TheCall, 1))
+       return ExprError();
+     break;

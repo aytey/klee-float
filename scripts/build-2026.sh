@@ -37,7 +37,7 @@ GCC7_LIBDIR=${GCC7_LIBDIR:-$(${HOST_CC} -print-libgcc-file-name | xargs dirname)
 GCC7_CXX_INC=${GCC7_CXX_INC:-/usr/include/c++/7}
 GCC7_CXX_INC_TARGET=${GCC7_CXX_INC_TARGET:-$GCC7_CXX_INC/$(${HOST_CC} -dumpmachine)}
 
-mkdir -p "$DEPS/src" "$PREFIX" "$DEPS/shim-bin" "$DEPS/compat"
+mkdir -p "$DEPS/src" "$PREFIX" "$DEPS/shim-bin"
 
 ###############################################################################
 # 0. Helper shims
@@ -49,35 +49,21 @@ cat > "$DEPS/shim-bin/python" <<'EOF'
 exec /usr/bin/python3 "$@"
 EOF
 
-# Compat header for the runtime build.  KLEE's runtime is compiled with
-# -D_GNU_SOURCE, which makes a modern glibc turn on its ISO C23 extensions.
-# Under C23 <string.h> redefines memchr/strchr/strrchr as _Generic macros,
-# which collide with klee-libc's own K&R style definitions of those same
-# functions.  Pull in <features.h> first (idempotent, it has an include guard),
-# then switch the C23 extensions back off before any real header is seen.
-cat > "$DEPS/compat/glibc-c23-off.h" <<'EOF'
-#include <features.h>
-#ifdef __GLIBC_USE_ISOC23
-#undef __GLIBC_USE_ISOC23
-#define __GLIBC_USE_ISOC23 0
-#endif
-#ifdef __GLIBC_USE_ISOC2Y
-#undef __GLIBC_USE_ISOC2Y
-#define __GLIBC_USE_ISOC2Y 0
-#endif
-EOF
-
-# `make` wrapper for KLEE's runtime (bitcode) build.  Two jobs:
-#  1. runtime/CMakeLists.txt runs `env MAKEFLAGS="" make -f Makefile.cmake.bitcode
-#     all`.  Modern CMake escapes the quotes, so make receives the literal
-#     two-character value '""' and dies with `invalid option -- '"'`.
-#  2. Inject the compat header above through the bitcode build system's own
-#     LLVMCC.ExtraFlags hook.
-cat > "$DEPS/shim-bin/make-clean-flags" <<EOF
+# `make` wrapper for KLEE's runtime (bitcode) build.
+# runtime/CMakeLists.txt runs `env MAKEFLAGS="" make -f Makefile.cmake.bitcode
+# all`.  Modern CMake escapes the quotes, so make receives the literal
+# two-character value '""' and dies with `invalid option -- '"'`.
+#
+# Note: do NOT be tempted to also inject a global -include header here (for
+# instance to defuse glibc's C23 _Generic macros).  runtime/POSIX/fd_64.c sets
+# _FILE_OFFSET_BITS before its own includes, so anything that pulls <features.h>
+# in earlier makes that file silently compile as the 32-bit model and define
+# open/stat/lseek instead of open64/stat64/lseek64.
+cat > "$DEPS/shim-bin/make-clean-flags" <<'EOF'
 #!/bin/sh
 MAKEFLAGS=
 export MAKEFLAGS
-exec /usr/bin/make "LLVMCC.ExtraFlags=-include $DEPS/compat/glibc-c23-off.h" "\$@"
+exec /usr/bin/make "$@"
 EOF
 
 # clang 3.4 wrapper (KLEE's LLVMCC, and klee-uclibc's bitcode compiler).
@@ -153,6 +139,10 @@ if [ ! -x "$PREFIX/bin/llvm-config" ]; then
   if [ ! -d llvm-3.4.2.src/tools/clang ]; then
     tar xf src/cfe-3.4.2.src.tar.gz
     mv cfe-3.4.2.src llvm-3.4.2.src/tools/clang
+    # Clang 3.4 declares __builtin_signbit as int(double), so signbit() on a
+    # float or long double converts first -- which loses the sign of a NaN
+    # under KLEE's floating point semantics.  See the patch header.
+    ( cd llvm-3.4.2.src && patch -p1 < "$SRC/scripts/patches/clang-3.4-type-generic-signbit.patch" )
   fi
   mkdir -p llvm-build && cd llvm-build
   ../llvm-3.4.2.src/configure \
