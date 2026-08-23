@@ -96,6 +96,31 @@ private:
   ExprHandle extractPartialShiftValue(ExprHandle shift, unsigned width,
                                       unsigned &shiftBits);
 
+  // Floating point.
+  //
+  // As in the Z3 builder, expressions are carried around as bitvectors and
+  // only converted to STP's floating-point sort where a floating-point
+  // operation actually needs one. castToFloat()/castToBitVector() do that
+  // conversion on demand, and the helpers that can be handed either sort
+  // (eqExpr, iteExpr, the bitvector operations) coerce their operands.
+  static bool isFloat(::VCExpr e);
+  /// Width in bits of the IEEE-754 format `e` has, i.e. exponent bits plus
+  /// significand bits *including* the hidden bit. Note this is 79, not 80,
+  /// for the format used to model x87 fp80 -- see castToFloat().
+  static unsigned getFloatBitWidth(::VCExpr e);
+  /// Maps one of Expr's float widths to the (exponent, significand) format
+  /// that models it. The significand count includes the hidden bit.
+  static void getFloatFormatFromBitWidth(unsigned bitWidth, int &expBits,
+                                         int &sigBits);
+  ExprHandle castToFloat(ExprHandle e);
+  ExprHandle castToBitVector(ExprHandle e);
+  ExprHandle getRoundingModeExpr(llvm::APFloat::roundingMode rm);
+  ExprHandle getx87FP80ExplicitSignificandIntegerBit(ExprHandle e);
+
+  // ITE that tolerates a mix of float and bitvector operands.
+  ExprHandle iteExpr(ExprHandle cond, ExprHandle whenTrue,
+                     ExprHandle whenFalse);
+
   ExprHandle constructAShrByConstant(ExprHandle expr, unsigned shift, 
                                      ExprHandle isSigned);
   ExprHandle constructMulByConstant(ExprHandle expr, unsigned width, uint64_t x);
@@ -112,6 +137,14 @@ private:
   ::VCExpr buildArray(const char *name, unsigned indexWidth, unsigned valueWidth);
  
 public:
+  /// Constraints generated as a side effect of translating to STP's
+  /// constraint language, rather than by any one Expr: casting an x87 fp80
+  /// bit pattern to a float pins the explicit significand integer bit (see
+  /// castToFloat()). Clients must assert these alongside the query, once the
+  /// whole query has been constructed, and clear them afterwards.
+  std::vector<ExprHandle> sideConstraints;
+  void clearSideConstraints() { sideConstraints.clear(); }
+
   STPBuilder(::VC _vc, bool _optimizeDivides=true);
   ~STPBuilder();
 

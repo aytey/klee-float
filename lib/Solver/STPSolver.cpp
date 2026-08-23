@@ -138,10 +138,17 @@ char *STPSolverImpl::getConstraintLog(const Query &query) {
   assert(query.expr == ConstantExpr::alloc(0, Expr::Bool) &&
          "Unexpected expression in query!");
 
+  for (std::vector<ExprHandle>::iterator
+           it = builder->sideConstraints.begin(),
+           ie = builder->sideConstraints.end();
+       it != ie; ++it)
+    vc_assertFormula(vc, *it);
+
   char *buffer;
   unsigned long length;
   vc_printQueryStateToBuffer(vc, builder->getFalse(), &buffer, &length, false);
   vc_pop(vc);
+  builder->clearSideConstraints();
 
   return buffer;
 }
@@ -340,6 +347,15 @@ bool STPSolverImpl::computeInitialValues(
 
   ExprHandle stp_e = builder->construct(query.expr);
 
+  // Assert any side constraints generated while building the query (see
+  // STPBuilder::castToFloat()). This has to come last, once everything has
+  // been traversed, so that we have all of them.
+  for (std::vector<ExprHandle>::iterator
+           it = builder->sideConstraints.begin(),
+           ie = builder->sideConstraints.end();
+       it != ie; ++it)
+    vc_assertFormula(vc, *it);
+
   if (DebugDumpSTPQueries) {
     char *buf;
     unsigned long len;
@@ -367,6 +383,10 @@ bool STPSolverImpl::computeInitialValues(
   }
 
   vc_pop(vc);
+
+  // Any generated side constraints could break subsequent queries if we were
+  // to assert them again, and they are re-generated per query anyway.
+  builder->clearSideConstraints();
 
   return success;
 }

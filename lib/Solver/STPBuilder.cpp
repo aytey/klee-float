@@ -149,15 +149,241 @@ ExprHandle STPBuilder::bvBoolExtract(ExprHandle expr, int bit) {
   return vc_eqExpr(vc, bvExtract(expr, bit, bit), bvOne(1));
 }
 ExprHandle STPBuilder::bvExtract(ExprHandle expr, unsigned top, unsigned bottom) {
-  return vc_bvExtract(vc, expr, top, bottom);
+  return vc_bvExtract(vc, castToBitVector(expr), top, bottom);
 }
 ExprHandle STPBuilder::eqExpr(ExprHandle a, ExprHandle b) {
-  assert((vc_getBVLength(vc, a) == vc_getBVLength(vc, b)) && "a and b should be same type");
+  // Handle implicit bitvector/float coercion
+  if (isFloat(a) != isFloat(b)) {
+    a = castToBitVector(a);
+    b = castToBitVector(b);
+  }
+  assert((isFloat(a) ||
+          vc_getBVLength(vc, a) == vc_getBVLength(vc, b)) &&
+         "a and b should be same type");
   return vc_eqExpr(vc, a, b);
+}
+
+ExprHandle STPBuilder::iteExpr(ExprHandle cond, ExprHandle whenTrue,
+                               ExprHandle whenFalse) {
+  // Handle implicit bitvector/float coercion
+  if (isFloat(whenTrue) != isFloat(whenFalse)) {
+    whenTrue = castToBitVector(whenTrue);
+    whenFalse = castToBitVector(whenFalse);
+  }
+  return vc_iteExpr(vc, cond, whenTrue, whenFalse);
+}
+
+/***/
+/* Floating point */
+
+bool STPBuilder::isFloat(::VCExpr e) {
+  // vc_getExpWidth() answers 0 for anything that is not floating-point.
+  return vc_getExpWidth(e) != 0;
+}
+
+unsigned STPBuilder::getFloatBitWidth(::VCExpr e) {
+  assert(isFloat(e) && "not a float");
+  // vc_getSigWidth() counts the hidden bit, so this is the IEEE interchange
+  // width for every format except the one modelling x87 fp80, where the
+  // "hidden" bit is not actually hidden and the sum comes to 79 (see
+  // castToFloat()).
+  return vc_getExpWidth(e) + vc_getSigWidth(e);
+}
+
+void STPBuilder::getFloatFormatFromBitWidth(unsigned bitWidth, int &expBits,
+                                            int &sigBits) {
+  switch (bitWidth) {
+  case Expr::Int16:
+    expBits = 5;
+    sigBits = 11;
+    return;
+  case Expr::Int32:
+    expBits = 8;
+    sigBits = 24;
+    return;
+  case Expr::Int64:
+    expBits = 11;
+    sigBits = 53;
+    return;
+  case Expr::Fl80:
+    // Note this is an IEEE-754 format with a 15 bit exponent and a 64 bit
+    // significand, which is not the same as x87 fp80's binary encoding. It
+    // gives us the right precision; castToFloat()/castToBitVector() deal with
+    // the difference in encoding.
+    expBits = 15;
+    sigBits = 64;
+    return;
+  case Expr::Int128:
+    expBits = 15;
+    sigBits = 113;
+    return;
+  default:
+    assert(0 && "bitWidth cannot be converted to an IEEE-754 binary-* number");
+    expBits = 0;
+    sigBits = 0;
+  }
+}
+
+ExprHandle
+STPBuilder::getx87FP80ExplicitSignificandIntegerBit(ExprHandle e) {
+#ifndef NDEBUG
+  assert(isFloat(e));
+  assert(vc_getExpWidth(e) == 15);
+  assert(vc_getSigWidth(e) == 64);
+#endif
+  // If the number is a denormal or zero then the implicit integer bit is
+  // zero, otherwise it is one.
+  ExprHandle isDenormal = vc_fpIsSubnormalExpr(vc, e);
+  ExprHandle isZero = vc_fpIsZeroExpr(vc, e);
+  ExprHandle condition = vc_orExpr(vc, isDenormal, isZero);
+  return vc_iteExpr(vc, condition, bvZero(1), bvOne(1));
+}
+
+ExprHandle STPBuilder::castToFloat(ExprHandle e) {
+  if (isFloat(e)) {
+    // Already a float
+    return e;
+  }
+
+  unsigned bitWidth = vc_getBVLength(vc, e);
+  int expBits = 0, sigBits = 0;
+  switch (bitWidth) {
+  case Expr::Int16:
+  case Expr::Int32:
+  case Expr::Int64:
+  case Expr::Int128:
+    getFloatFormatFromBitWidth(bitWidth, expBits, sigBits);
+    return vc_fpToFPFromIEEEBV(vc, expBits, sigBits, e);
+  case Expr::Fl80: {
+    // The bit pattern used by x87 fp80 and the one we use in STP differ.
+    //
+    // x87 fp80
+    //
+    // Sign Exponent Significand
+    // [1]    [15]   [1] [63]
+    //
+    // The exponent has bias 16383 and the significand has the integer portion
+    // as an explicit bit.
+    //
+    // 79-bit IEEE-754 encoding used here
+    //
+    // Sign Exponent [Significand]
+    // [1]    [15]       [63]
+    //
+    // Exponent has bias 16383 (2^(15-1) - 1) and the significand has the
+    // integer portion as an implicit bit.
+    //
+    // We provide the mapping here and also emit a side constraint so that the
+    // explicit bit is constrained appropriately, and a model comes back with
+    // the correct bit pattern.
+    //
+    // This assumes IEEE semantics; x87 fp80 actually has additional semantics
+    // due to the explicit bit (see 8.2.2 "Unsupported Double
+    // Extended-Precision Floating-Point Encodings and Pseudo-Denormals" in the
+    // Intel 64 and IA-32 Architectures Software Developer's Manual), but this
+    // encoding means we cannot model those unsupported values.
+    //
+    // Note this code must be kept in sync with STPBuilder::castToBitVector(),
+    // which performs the inverse operation.
+    //
+    // Note we avoid calling our own helpers that do implicit casting here, so
+    // that we can never recursively call into this function.
+    ExprHandle signBit = vc_bvExtract(vc, e, /*high=*/79, /*low=*/79);
+    ExprHandle exponentBits = vc_bvExtract(vc, e, /*high=*/78, /*low=*/64);
+    ExprHandle significandIntegerBit =
+        vc_bvExtract(vc, e, /*high=*/63, /*low=*/63);
+    ExprHandle significandFractionBits =
+        vc_bvExtract(vc, e, /*high=*/62, /*low=*/0);
+
+    ExprHandle ieeeBitPattern = vc_bvConcatExpr(vc, signBit, exponentBits);
+    ieeeBitPattern =
+        vc_bvConcatExpr(vc, ieeeBitPattern, significandFractionBits);
+    assert(vc_getBVLength(vc, ieeeBitPattern) == 79);
+
+    getFloatFormatFromBitWidth(bitWidth, expBits, sigBits);
+    ExprHandle ieeeBitPatternAsFloat =
+        vc_fpToFPFromIEEEBV(vc, expBits, sigBits, ieeeBitPattern);
+
+    // Generate the side constraint on the significand integer bit. It is not
+    // used in `ieeeBitPatternAsFloat`, so we have to constrain it to the right
+    // value ourselves for a model's bit pattern to be a valid x87 fp80.
+    ExprHandle significandIntegerBitConstrainedValue =
+        getx87FP80ExplicitSignificandIntegerBit(ieeeBitPatternAsFloat);
+    sideConstraints.push_back(vc_eqExpr(
+        vc, significandIntegerBit, significandIntegerBitConstrainedValue));
+    return ieeeBitPatternAsFloat;
+  }
+  default:
+    assert(0 && "Unhandled width when casting bitvector to float");
+    return e;
+  }
+}
+
+ExprHandle STPBuilder::castToBitVector(ExprHandle e) {
+  if (!isFloat(e)) {
+    // Already a bitvector
+    return e;
+  }
+
+  // Note this picks a single representation for NaN, which means
+  // `castToBitVector(castToFloat(e))` might not equal `e`.
+  unsigned floatWidth = getFloatBitWidth(e);
+  switch (floatWidth) {
+  case Expr::Int16:
+  case Expr::Int32:
+  case Expr::Int64:
+  case Expr::Int128:
+    return vc_fpToIEEEBV(vc, e);
+  case 79: {
+    // This is Expr::Fl80 (15 bit exponent, 64 bit significand) but, because
+    // the "implicit" bit is actually explicit in x87 fp80, the sum of the
+    // exponent and significand widths is 79 rather than 80.
+
+    // Get STP's IEEE representation.
+    ExprHandle ieeeBits = vc_fpToIEEEBV(vc, e);
+
+    // Construct the x87 fp80 bit representation.
+    ExprHandle signBit = vc_bvExtract(vc, ieeeBits, /*high=*/78, /*low=*/78);
+    ExprHandle exponentBits =
+        vc_bvExtract(vc, ieeeBits, /*high=*/77, /*low=*/63);
+    ExprHandle significandIntegerBit =
+        getx87FP80ExplicitSignificandIntegerBit(e);
+    ExprHandle significandFractionBits =
+        vc_bvExtract(vc, ieeeBits, /*high=*/62, /*low=*/0);
+
+    ExprHandle x87FP80Bits = vc_bvConcatExpr(vc, signBit, exponentBits);
+    x87FP80Bits = vc_bvConcatExpr(vc, x87FP80Bits, significandIntegerBit);
+    x87FP80Bits = vc_bvConcatExpr(vc, x87FP80Bits, significandFractionBits);
+    assert(vc_getBVLength(vc, x87FP80Bits) == 80);
+    return x87FP80Bits;
+  }
+  default:
+    assert(0 && "Unhandled width when casting float to bitvector");
+    return e;
+  }
+}
+
+ExprHandle STPBuilder::getRoundingModeExpr(llvm::APFloat::roundingMode rm) {
+  switch (rm) {
+  case llvm::APFloat::rmNearestTiesToEven:
+    return vc_fpRoundingMode(vc, VC_RM_RNE);
+  case llvm::APFloat::rmTowardPositive:
+    return vc_fpRoundingMode(vc, VC_RM_RTP);
+  case llvm::APFloat::rmTowardNegative:
+    return vc_fpRoundingMode(vc, VC_RM_RTN);
+  case llvm::APFloat::rmTowardZero:
+    return vc_fpRoundingMode(vc, VC_RM_RTZ);
+  case llvm::APFloat::rmNearestTiesToAway:
+    return vc_fpRoundingMode(vc, VC_RM_RNA);
+  default:
+    assert(0 && "Unhandled rounding mode");
+    return vc_fpRoundingMode(vc, VC_RM_RNE);
+  }
 }
 
 // logical right shift
 ExprHandle STPBuilder::bvRightShift(ExprHandle expr, unsigned shift) {
+  expr = castToBitVector(expr);
   unsigned width = vc_getBVLength(vc, expr);
 
   if (shift==0) {
@@ -173,6 +399,7 @@ ExprHandle STPBuilder::bvRightShift(ExprHandle expr, unsigned shift) {
 
 // logical left shift
 ExprHandle STPBuilder::bvLeftShift(ExprHandle expr, unsigned shift) {
+  expr = castToBitVector(expr);
   unsigned width = vc_getBVLength(vc, expr);
 
   if (shift==0) {
@@ -202,6 +429,8 @@ ExprHandle STPBuilder::extractPartialShiftValue(ExprHandle shift,
 
 // left shift by a variable amount on an expression of the specified width
 ExprHandle STPBuilder::bvVarLeftShift(ExprHandle expr, ExprHandle shift) {
+  expr = castToBitVector(expr);
+  shift = castToBitVector(shift);
   unsigned width = vc_getBVLength(vc, expr);
   ExprHandle res = bvZero(width);
 
@@ -226,6 +455,8 @@ ExprHandle STPBuilder::bvVarLeftShift(ExprHandle expr, ExprHandle shift) {
 // logical right shift by a variable amount on an expression of the specified
 // width
 ExprHandle STPBuilder::bvVarRightShift(ExprHandle expr, ExprHandle shift) {
+  expr = castToBitVector(expr);
+  shift = castToBitVector(shift);
   unsigned width = vc_getBVLength(vc, expr);
   ExprHandle res = bvZero(width);
 
@@ -251,6 +482,8 @@ ExprHandle STPBuilder::bvVarRightShift(ExprHandle expr, ExprHandle shift) {
 // arithmetic right shift by a variable amount on an expression of the specified
 // width
 ExprHandle STPBuilder::bvVarArithRightShift(ExprHandle expr, ExprHandle shift) {
+  expr = castToBitVector(expr);
+  shift = castToBitVector(shift);
   unsigned width = vc_getBVLength(vc, expr);
 
   unsigned shiftBits = 0;
@@ -281,6 +514,7 @@ ExprHandle STPBuilder::bvVarArithRightShift(ExprHandle expr, ExprHandle shift) {
 ExprHandle STPBuilder::constructAShrByConstant(ExprHandle expr,
                                                unsigned shift,
                                                ExprHandle isSigned) {
+  expr = castToBitVector(expr);
   unsigned width = vc_getBVLength(vc, expr);
 
   if (shift==0) {
@@ -532,10 +766,14 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       return CE->isTrue() ? getTrue() : getFalse();
 
     // Fast path.
-    if (*width_out <= 32)
-      return bvConst32(*width_out, CE->getZExtValue(32));
-    if (*width_out <= 64)
-      return bvConst64(*width_out, CE->getZExtValue());
+    if (*width_out <= 32) {
+      ExprHandle Res = bvConst32(*width_out, CE->getZExtValue(32));
+      return CE->isFloat() ? castToFloat(Res) : Res;
+    }
+    if (*width_out <= 64) {
+      ExprHandle Res = bvConst64(*width_out, CE->getZExtValue());
+      return CE->isFloat() ? castToFloat(Res) : Res;
+    }
 
     ref<ConstantExpr> Tmp = CE;
     ExprHandle Res = bvConst64(64, Tmp->Extract(0, 64)->getZExtValue());
@@ -546,6 +784,9 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
                                         Tmp->Extract(0, Width)->getZExtValue()),
                             Res);
     }
+    // Coerce to float if necessary
+    if (CE->isFloat())
+      Res = castToFloat(Res);
     return Res;
   }
     
@@ -569,15 +810,16 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
     ExprHandle cond = construct(se->cond, 0);
     ExprHandle tExpr = construct(se->trueExpr, width_out);
     ExprHandle fExpr = construct(se->falseExpr, width_out);
-    return vc_iteExpr(vc, cond, tExpr, fExpr);
+    return iteExpr(cond, tExpr, fExpr);
   }
 
   case Expr::Concat: {
     ConcatExpr *ce = cast<ConcatExpr>(e);
     unsigned numKids = ce->getNumKids();
-    ExprHandle res = construct(ce->getKid(numKids-1), 0);
+    ExprHandle res = castToBitVector(construct(ce->getKid(numKids-1), 0));
     for (int i=numKids-2; i>=0; i--) {
-      res = vc_bvConcatExpr(vc, construct(ce->getKid(i), 0), res);
+      res = vc_bvConcatExpr(vc, castToBitVector(construct(ce->getKid(i), 0)),
+                            res);
     }
     *width_out = ce->getWidth();
     return res;
@@ -590,7 +832,7 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
     if (*width_out==1) {
       return bvBoolExtract(src, ee->offset);
     } else {
-      return vc_bvExtract(vc, src, ee->offset + *width_out - 1, ee->offset);
+      return bvExtract(src, ee->offset + *width_out - 1, ee->offset);
     }
   }
 
@@ -604,7 +846,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
     if (srcWidth==1) {
       return vc_iteExpr(vc, src, bvOne(*width_out), bvZero(*width_out));
     } else {
-      return vc_bvConcatExpr(vc, bvZero(*width_out-srcWidth), src);
+      return vc_bvConcatExpr(vc, bvZero(*width_out-srcWidth),
+                             castToBitVector(src));
     }
   }
 
@@ -616,31 +859,115 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
     if (srcWidth==1) {
       return vc_iteExpr(vc, src, bvMinusOne(*width_out), bvZero(*width_out));
     } else {
-      return vc_bvSignExtend(vc, src, *width_out);
+      return vc_bvSignExtend(vc, castToBitVector(src), *width_out);
     }
+  }
+
+  case Expr::FPExt: {
+    int srcWidth;
+    FPExtExpr *ce = cast<FPExtExpr>(e);
+    ExprHandle src = castToFloat(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(*width_out)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid FPExt width");
+    assert(*width_out >= srcWidth && "Invalid FPExt");
+    int expBits, sigBits;
+    getFloatFormatFromBitWidth(*width_out, expBits, sigBits);
+    // Any rounding mode will do here as we are extending.
+    return vc_fpToFPFromFP(
+        vc, expBits, sigBits,
+        getRoundingModeExpr(llvm::APFloat::rmNearestTiesToEven), src);
+  }
+
+  case Expr::FPTrunc: {
+    int srcWidth;
+    FPTruncExpr *ce = cast<FPTruncExpr>(e);
+    ExprHandle src = castToFloat(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(*width_out)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid FPTrunc width");
+    assert(*width_out <= srcWidth && "Invalid FPTrunc");
+    int expBits, sigBits;
+    getFloatFormatFromBitWidth(*width_out, expBits, sigBits);
+    return vc_fpToFPFromFP(vc, expBits, sigBits,
+                           getRoundingModeExpr(ce->roundingMode), src);
+  }
+
+  case Expr::FPToUI: {
+    int srcWidth;
+    FPToUIExpr *ce = cast<FPToUIExpr>(e);
+    ExprHandle src = castToFloat(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(srcWidth)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid FPToUI width");
+    return vc_fpToUBVExpr(vc, *width_out,
+                          getRoundingModeExpr(ce->roundingMode), src);
+  }
+
+  case Expr::FPToSI: {
+    int srcWidth;
+    FPToSIExpr *ce = cast<FPToSIExpr>(e);
+    ExprHandle src = castToFloat(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(srcWidth)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid FPToSI width");
+    return vc_fpToSBVExpr(vc, *width_out,
+                          getRoundingModeExpr(ce->roundingMode), src);
+  }
+
+  case Expr::UIToFP: {
+    int srcWidth;
+    UIToFPExpr *ce = cast<UIToFPExpr>(e);
+    ExprHandle src = castToBitVector(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(*width_out)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid UIToFP width");
+    int expBits, sigBits;
+    getFloatFormatFromBitWidth(*width_out, expBits, sigBits);
+    return vc_fpToFPFromUnsignedBV(vc, expBits, sigBits,
+                                   getRoundingModeExpr(ce->roundingMode), src);
+  }
+
+  case Expr::SIToFP: {
+    int srcWidth;
+    SIToFPExpr *ce = cast<SIToFPExpr>(e);
+    ExprHandle src = castToBitVector(construct(ce->src, &srcWidth));
+    *width_out = ce->getWidth();
+    assert(&(ConstantExpr::widthToFloatSemantics(*width_out)) !=
+               &(llvm::APFloat::Bogus) &&
+           "Invalid SIToFP width");
+    int expBits, sigBits;
+    getFloatFormatFromBitWidth(*width_out, expBits, sigBits);
+    return vc_fpToFPFromSignedBV(vc, expBits, sigBits,
+                                 getRoundingModeExpr(ce->roundingMode), src);
   }
 
     // Arithmetic
 
   case Expr::Add: {
     AddExpr *ae = cast<AddExpr>(e);
-    ExprHandle left = construct(ae->left, width_out);
-    ExprHandle right = construct(ae->right, width_out);
+    ExprHandle left = castToBitVector(construct(ae->left, width_out));
+    ExprHandle right = castToBitVector(construct(ae->right, width_out));
     assert(*width_out!=1 && "uncanonicalized add");
     return vc_bvPlusExpr(vc, *width_out, left, right);
   }
 
   case Expr::Sub: {
     SubExpr *se = cast<SubExpr>(e);
-    ExprHandle left = construct(se->left, width_out);
-    ExprHandle right = construct(se->right, width_out);
+    ExprHandle left = castToBitVector(construct(se->left, width_out));
+    ExprHandle right = castToBitVector(construct(se->right, width_out));
     assert(*width_out!=1 && "uncanonicalized sub");
     return vc_bvMinusExpr(vc, *width_out, left, right);
   } 
 
   case Expr::Mul: {
     MulExpr *me = cast<MulExpr>(e);
-    ExprHandle right = construct(me->right, width_out);
+    ExprHandle right = castToBitVector(construct(me->right, width_out));
     assert(*width_out!=1 && "uncanonicalized mul");
 
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(me->left))
@@ -648,13 +975,13 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
         return constructMulByConstant(right, *width_out, 
                                       CE->getZExtValue());
 
-    ExprHandle left = construct(me->left, width_out);
+    ExprHandle left = castToBitVector(construct(me->left, width_out));
     return vc_bvMultExpr(vc, *width_out, left, right);
   }
 
   case Expr::UDiv: {
     UDivExpr *de = cast<UDivExpr>(e);
-    ExprHandle left = construct(de->left, width_out);
+    ExprHandle left = castToBitVector(construct(de->left, width_out));
     assert(*width_out!=1 && "uncanonicalized udiv");
     
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(de->right)) {
@@ -672,13 +999,13 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       }
     } 
 
-    ExprHandle right = construct(de->right, width_out);
+    ExprHandle right = castToBitVector(construct(de->right, width_out));
     return vc_bvDivExpr(vc, *width_out, left, right);
   }
 
   case Expr::SDiv: {
     SDivExpr *de = cast<SDivExpr>(e);
-    ExprHandle left = construct(de->left, width_out);
+    ExprHandle left = castToBitVector(construct(de->left, width_out));
     assert(*width_out!=1 && "uncanonicalized sdiv");
 
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(de->right))
@@ -692,13 +1019,13 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       }
     // XXX need to test for proper handling of sign, not sure I
     // trust STP
-    ExprHandle right = construct(de->right, width_out);
+    ExprHandle right = castToBitVector(construct(de->right, width_out));
     return vc_sbvDivExpr(vc, *width_out, left, right);
   }
 
   case Expr::URem: {
     URemExpr *de = cast<URemExpr>(e);
-    ExprHandle left = construct(de->left, width_out);
+    ExprHandle left = castToBitVector(construct(de->left, width_out));
     assert(*width_out!=1 && "uncanonicalized urem");
     
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(de->right)) {
@@ -732,14 +1059,14 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       }
     }
     
-    ExprHandle right = construct(de->right, width_out);
+    ExprHandle right = castToBitVector(construct(de->right, width_out));
     return vc_bvModExpr(vc, *width_out, left, right);
   }
 
   case Expr::SRem: {
     SRemExpr *de = cast<SRemExpr>(e);
-    ExprHandle left = construct(de->left, width_out);
-    ExprHandle right = construct(de->right, width_out);
+    ExprHandle left = castToBitVector(construct(de->left, width_out));
+    ExprHandle right = castToBitVector(construct(de->right, width_out));
     assert(*width_out!=1 && "uncanonicalized srem");
 
 #if 0 //not faster per first benchmark
@@ -766,7 +1093,7 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Not: {
     NotExpr *ne = cast<NotExpr>(e);
-    ExprHandle expr = construct(ne->expr, width_out);
+    ExprHandle expr = castToBitVector(construct(ne->expr, width_out));
     if (*width_out==1) {
       return vc_notExpr(vc, expr);
     } else {
@@ -776,8 +1103,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::And: {
     AndExpr *ae = cast<AndExpr>(e);
-    ExprHandle left = construct(ae->left, width_out);
-    ExprHandle right = construct(ae->right, width_out);
+    ExprHandle left = castToBitVector(construct(ae->left, width_out));
+    ExprHandle right = castToBitVector(construct(ae->right, width_out));
     if (*width_out==1) {
       return vc_andExpr(vc, left, right);
     } else {
@@ -787,8 +1114,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Or: {
     OrExpr *oe = cast<OrExpr>(e);
-    ExprHandle left = construct(oe->left, width_out);
-    ExprHandle right = construct(oe->right, width_out);
+    ExprHandle left = castToBitVector(construct(oe->left, width_out));
+    ExprHandle right = castToBitVector(construct(oe->right, width_out));
     if (*width_out==1) {
       return vc_orExpr(vc, left, right);
     } else {
@@ -798,9 +1125,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Xor: {
     XorExpr *xe = cast<XorExpr>(e);
-    ExprHandle left = construct(xe->left, width_out);
-    ExprHandle right = construct(xe->right, width_out);
-    
+    ExprHandle left = castToBitVector(construct(xe->left, width_out));
+    ExprHandle right = castToBitVector(construct(xe->right, width_out));
     if (*width_out==1) {
       // XXX check for most efficient?
       return vc_iteExpr(vc, left, 
@@ -812,35 +1138,35 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Shl: {
     ShlExpr *se = cast<ShlExpr>(e);
-    ExprHandle left = construct(se->left, width_out);
+    ExprHandle left = castToBitVector(construct(se->left, width_out));
     assert(*width_out!=1 && "uncanonicalized shl");
 
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(se->right)) {
       return bvLeftShift(left, (unsigned) CE->getLimitedValue());
     } else {
       int shiftWidth;
-      ExprHandle amount = construct(se->right, &shiftWidth);
+      ExprHandle amount = castToBitVector(construct(se->right, &shiftWidth));
       return bvVarLeftShift( left, amount);
     }
   }
 
   case Expr::LShr: {
     LShrExpr *lse = cast<LShrExpr>(e);
-    ExprHandle left = construct(lse->left, width_out);
+    ExprHandle left = castToBitVector(construct(lse->left, width_out));
     assert(*width_out!=1 && "uncanonicalized lshr");
 
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(lse->right)) {
       return bvRightShift(left, (unsigned) CE->getLimitedValue());
     } else {
       int shiftWidth;
-      ExprHandle amount = construct(lse->right, &shiftWidth);
+      ExprHandle amount = castToBitVector(construct(lse->right, &shiftWidth));
       return bvVarRightShift( left, amount);
     }
   }
 
   case Expr::AShr: {
     AShrExpr *ase = cast<AShrExpr>(e);
-    ExprHandle left = construct(ase->left, width_out);
+    ExprHandle left = castToBitVector(construct(ase->left, width_out));
     assert(*width_out!=1 && "uncanonicalized ashr");
     
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(ase->right)) {
@@ -849,7 +1175,7 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       return constructAShrByConstant(left, shift, signedBool);
     } else {
       int shiftWidth;
-      ExprHandle amount = construct(ase->right, &shiftWidth);
+      ExprHandle amount = castToBitVector(construct(ase->right, &shiftWidth));
       return bvVarArithRightShift( left, amount);
     }
   }
@@ -870,14 +1196,14 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
       }
     } else {
       *width_out = 1;
-      return vc_eqExpr(vc, left, right);
+      return eqExpr(left, right);
     }
   }
 
   case Expr::Ult: {
     UltExpr *ue = cast<UltExpr>(e);
-    ExprHandle left = construct(ue->left, width_out);
-    ExprHandle right = construct(ue->right, width_out);
+    ExprHandle left = castToBitVector(construct(ue->left, width_out));
+    ExprHandle right = castToBitVector(construct(ue->right, width_out));
     assert(*width_out!=1 && "uncanonicalized ult");
     *width_out = 1;
     return vc_bvLtExpr(vc, left, right);
@@ -885,8 +1211,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Ule: {
     UleExpr *ue = cast<UleExpr>(e);
-    ExprHandle left = construct(ue->left, width_out);
-    ExprHandle right = construct(ue->right, width_out);
+    ExprHandle left = castToBitVector(construct(ue->left, width_out));
+    ExprHandle right = castToBitVector(construct(ue->right, width_out));
     assert(*width_out!=1 && "uncanonicalized ule");
     *width_out = 1;
     return vc_bvLeExpr(vc, left, right);
@@ -894,8 +1220,8 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Slt: {
     SltExpr *se = cast<SltExpr>(e);
-    ExprHandle left = construct(se->left, width_out);
-    ExprHandle right = construct(se->right, width_out);
+    ExprHandle left = castToBitVector(construct(se->left, width_out));
+    ExprHandle right = castToBitVector(construct(se->right, width_out));
     assert(*width_out!=1 && "uncanonicalized slt");
     *width_out = 1;
     return vc_sbvLtExpr(vc, left, right);
@@ -903,14 +1229,132 @@ ExprHandle STPBuilder::constructActual(ref<Expr> e, int *width_out) {
 
   case Expr::Sle: {
     SleExpr *se = cast<SleExpr>(e);
-    ExprHandle left = construct(se->left, width_out);
-    ExprHandle right = construct(se->right, width_out);
+    ExprHandle left = castToBitVector(construct(se->left, width_out));
+    ExprHandle right = castToBitVector(construct(se->right, width_out));
     assert(*width_out!=1 && "uncanonicalized sle");
     *width_out = 1;
     return vc_sbvLeExpr(vc, left, right);
   }
 
-    // unused due to canonicalization
+      case Expr::FOEq: {
+    FOEqExpr *fcmp = cast<FOEqExpr>(e);
+    ExprHandle left = castToFloat(construct(fcmp->left, width_out));
+    ExprHandle right = castToFloat(construct(fcmp->right, width_out));
+    *width_out = 1;
+    return vc_fpEqExpr(vc, left, right);
+  }
+
+  case Expr::FOLt: {
+    FOLtExpr *fcmp = cast<FOLtExpr>(e);
+    ExprHandle left = castToFloat(construct(fcmp->left, width_out));
+    ExprHandle right = castToFloat(construct(fcmp->right, width_out));
+    *width_out = 1;
+    return vc_fpLtExpr(vc, left, right);
+  }
+
+  case Expr::FOLe: {
+    FOLeExpr *fcmp = cast<FOLeExpr>(e);
+    ExprHandle left = castToFloat(construct(fcmp->left, width_out));
+    ExprHandle right = castToFloat(construct(fcmp->right, width_out));
+    *width_out = 1;
+    return vc_fpLeqExpr(vc, left, right);
+  }
+
+  case Expr::FOGt: {
+    FOGtExpr *fcmp = cast<FOGtExpr>(e);
+    ExprHandle left = castToFloat(construct(fcmp->left, width_out));
+    ExprHandle right = castToFloat(construct(fcmp->right, width_out));
+    *width_out = 1;
+    return vc_fpGtExpr(vc, left, right);
+  }
+
+  case Expr::FOGe: {
+    FOGeExpr *fcmp = cast<FOGeExpr>(e);
+    ExprHandle left = castToFloat(construct(fcmp->left, width_out));
+    ExprHandle right = castToFloat(construct(fcmp->right, width_out));
+    *width_out = 1;
+    return vc_fpGeqExpr(vc, left, right);
+  }
+
+  case Expr::IsNaN: {
+    IsNaNExpr *ine = cast<IsNaNExpr>(e);
+    ExprHandle arg = castToFloat(construct(ine->expr, width_out));
+    *width_out = 1;
+    return vc_fpIsNaNExpr(vc, arg);
+  }
+
+  case Expr::IsInfinite: {
+    IsInfiniteExpr *iie = cast<IsInfiniteExpr>(e);
+    ExprHandle arg = castToFloat(construct(iie->expr, width_out));
+    *width_out = 1;
+    return vc_fpIsInfiniteExpr(vc, arg);
+  }
+
+  case Expr::IsNormal: {
+    IsNormalExpr *ine = cast<IsNormalExpr>(e);
+    ExprHandle arg = castToFloat(construct(ine->expr, width_out));
+    *width_out = 1;
+    return vc_fpIsNormalExpr(vc, arg);
+  }
+
+  case Expr::IsSubnormal: {
+    IsSubnormalExpr *ise = cast<IsSubnormalExpr>(e);
+    ExprHandle arg = castToFloat(construct(ise->expr, width_out));
+    *width_out = 1;
+    return vc_fpIsSubnormalExpr(vc, arg);
+  }
+
+  case Expr::FAdd: {
+    FAddExpr *fadd = cast<FAddExpr>(e);
+    ExprHandle left = castToFloat(construct(fadd->left, width_out));
+    ExprHandle right = castToFloat(construct(fadd->right, width_out));
+    assert(*width_out != 1 && "uncanonicalized FAdd");
+    return vc_fpAddExpr(vc, getRoundingModeExpr(fadd->roundingMode), left,
+                        right);
+  }
+
+  case Expr::FSub: {
+    FSubExpr *fsub = cast<FSubExpr>(e);
+    ExprHandle left = castToFloat(construct(fsub->left, width_out));
+    ExprHandle right = castToFloat(construct(fsub->right, width_out));
+    assert(*width_out != 1 && "uncanonicalized FSub");
+    return vc_fpSubExpr(vc, getRoundingModeExpr(fsub->roundingMode), left,
+                        right);
+  }
+
+  case Expr::FMul: {
+    FMulExpr *fmul = cast<FMulExpr>(e);
+    ExprHandle left = castToFloat(construct(fmul->left, width_out));
+    ExprHandle right = castToFloat(construct(fmul->right, width_out));
+    assert(*width_out != 1 && "uncanonicalized FMul");
+    return vc_fpMulExpr(vc, getRoundingModeExpr(fmul->roundingMode), left,
+                        right);
+  }
+
+  case Expr::FDiv: {
+    FDivExpr *fdiv = cast<FDivExpr>(e);
+    ExprHandle left = castToFloat(construct(fdiv->left, width_out));
+    ExprHandle right = castToFloat(construct(fdiv->right, width_out));
+    assert(*width_out != 1 && "uncanonicalized FDiv");
+    return vc_fpDivExpr(vc, getRoundingModeExpr(fdiv->roundingMode), left,
+                        right);
+  }
+
+  case Expr::FSqrt: {
+    FSqrtExpr *fsqrt = cast<FSqrtExpr>(e);
+    ExprHandle arg = castToFloat(construct(fsqrt->expr, width_out));
+    assert(*width_out != 1 && "uncanonicalized FSqrt");
+    return vc_fpSqrtExpr(vc, getRoundingModeExpr(fsqrt->roundingMode), arg);
+  }
+
+  case Expr::FAbs: {
+    FAbsExpr *fabsExpr = cast<FAbsExpr>(e);
+    ExprHandle arg = castToFloat(construct(fabsExpr->expr, width_out));
+    assert(*width_out != 1 && "uncanonicalized FAbs");
+    return vc_fpAbsExpr(vc, arg);
+  }
+
+// unused due to canonicalization
 #if 0
   case Expr::Ne:
   case Expr::Ugt:
