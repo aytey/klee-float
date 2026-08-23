@@ -289,12 +289,58 @@ narrower, so STP wins them, while floating-point blasting produces the wide
 multipliers inside `fp.mul`, `fp.div` and `fp.sqrt` on 24- and 53-bit
 significands, so Bitwuzla wins those.
 
-So the work needed to make STP win outright is **lazy abstraction and
+So the work needed to make STP win outright is in **lazy abstraction and
 refinement of wide bit-vector arithmetic** — not KLEE's integration, not the
 SAT solver, and not STP's blasting or its bitvector reasoning, all of which are
-already competitive or better. STP already has abstraction-refinement machinery
-(`AbsRefineCounterExample/`) applied to arrays; extending that idea to wide
-arithmetic is the concrete work item.
+already competitive or better.
+
+### STP already has that machinery, and enabling it does not close the gap
+
+`lib/ToSat/BVAbstractionRefiner.cpp` is a CEGAR refiner over bit-blasted
+bit-vector operations, reachable from the C API through `BV_TERM_ABSTRACTION`
+(wide arithmetic, comparisons and ITE; off by default),
+`BV_TERM_ABSTRACTION_MULT` (whether that covers `BVMULT`/`BVDIV`/`BVMOD`; on),
+`BV_EQ_ABSTRACTION` (wide equalities; off), `BV_ABSTRACTION_WIDTH` (the floor,
+**64** where Bitwuzla's is 33), `BV_EQ_REFINE_WIDTH` and
+`BV_TERM_ABSTRACTION_ROUNDS` (the escalation budget, 32).
+
+The width gap looks like the answer — a double's 53-bit significand multiplier
+falls between STP's floor and Bitwuzla's — but measuring says otherwise. Over
+the same 39 queries, three repetitions of each:
+
+| Configuration | Median | Range | Solved |
+| --- | --- | --- | --- |
+| STP baseline | 84.55s | 82.47–87.92 | 39 |
+| STP `--bv-term-abstraction --bv-abstraction-width 53` | 84.10s | 76.27–86.02 | 39 |
+| Bitwuzla (abstraction on) | **63.03s** | 62.11–68.78 | 39 |
+
+Enabling term abstraction at a safe width is **a wash** — 0.5% on the median,
+better in two of three paired repetitions, ranges overlapping heavily. (A
+single-run sweep suggested ~5%; that did not survive repetition.) Bitwuzla stays
+1.34× ahead, and there its range is cleanly separated from both STP
+configurations.
+
+Lowering STP's floor to Bitwuzla's 33 is far worse than doing nothing:
+
+| Configuration at width 33 | Total | Solved (30s cap) |
+| --- | --- | --- |
+| default (`rounds` 32) | 361.7s | 32 / 39 |
+| `--bv-term-abstraction-rounds 4` | 319.5s | 33 / 39 |
+| `--bv-term-abstraction-rounds 1` | 370.4s | 30 / 39 |
+| `--bv-term-abstraction-mult 0` | **73.9s** | 39 / 39 |
+
+Four to five times slower with queries left unsolved, and the escalation budget
+does not rescue it — refining sooner or later is equally bad. Turning off just
+the multiplier abstraction at the same width restores baseline performance, so
+it is specifically `BVMULT`/`BVDIV`/`BVMOD` refinement that fails to converge on
+these queries. Equality abstraction alone changes nothing either way.
+
+So the work item is narrower and harder than "implement abstraction": the
+mechanism is there, and what it needs is a multiplier abstraction whose
+refinement converges on the wide products that floating-point blasting
+produces. Both figures above are one benchmark's 39 queries, so any tuning that
+does look promising should be checked against the wider set before it is
+believed.
 
 ### How much of this is noise?
 
