@@ -74,6 +74,19 @@ off64_t lseek(int fd, off64_t offset, int whence) {
   return __fd_lseek(fd, offset, whence);
 }
 
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+/* glibc >= 2.33 dropped the __xstat()/_STAT_VER interface: <sys/stat.h> no
+   longer declares these functions at all, so the _FILE_OFFSET_BITS=64 redirect
+   that used to emit the definitions below as __xstat64/__lxstat64/__fxstat64 no
+   longer happens.  Without it they collide with the identically named 32-bit
+   definitions in fd_32.c as soon as both modules are pulled out of the runtime
+   archive.  Ask for the 64-bit names explicitly, exactly as glibc's __REDIRECT
+   used to. */
+int __xstat(int vers, const char *path, struct stat *buf) __asm__("__xstat64");
+int __lxstat(int vers, const char *path, struct stat *buf) __asm__("__lxstat64");
+int __fxstat(int vers, int fd, struct stat *buf) __asm__("__fxstat64");
+#endif
+
 int __xstat(int vers, const char *path, struct stat *buf) {
   return __fd_stat(path, (struct stat64*) buf);
 }
