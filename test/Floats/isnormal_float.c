@@ -14,9 +14,13 @@ int main() {
     assert(isnormal(x));
   } else {
     assert(!klee_is_normal_float(x));
-    // forks in ``isnormal()``: could be 0, NaN, Inf, subnormal
+    // glibc >= 2.32 implements isnormal() as __builtin_isnormal(), which the
+    // compiler expands inline to a couple of comparisons.  It used to dispatch
+    // to __fpclassify(), which KLEE modelled and which forked four ways here
+    // (0, NaN, Inf, subnormal), for five completed paths in total.  Either way
+    // the assertions below are what matters: they hold for every input.
     assert(!isnormal(x));
   }
 }
 // CHECK-NOT: silently concretizing (reason: floating point)
-// CHECK: KLEE: done: completed paths = 5
+// CHECK: KLEE: done: completed paths = 2
