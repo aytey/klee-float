@@ -32,10 +32,17 @@ mkdir -p "$OUT"
 grep "^  program:" "$INVOKE" | awk '{print $2}' > "$OUT/bclist.txt"
 echo "benchmarks: $(wc -l < "$OUT/bclist.txt")   configs: ${CONFIGS[*]}"
 
+# Benchmark-major, so the configurations are interleaved: every one of them
+# runs on a given benchmark before any of them moves to the next. Ordered by
+# configuration instead -- which is what this did -- each one occupies its own
+# window of wall-clock time, and on a shared machine whatever else is running
+# during that window lands on it alone. That is not a small effect here: load
+# on this box swings between 2 and 20, which is worth more than any of the
+# differences being measured.
 : > "$OUT/jobs.txt"
-for cfg in "${CONFIGS[@]}"; do
-  while read -r bc; do echo "$cfg $bc"; done < "$OUT/bclist.txt" >> "$OUT/jobs.txt"
-done
+while read -r bc; do
+  for cfg in "${CONFIGS[@]}"; do echo "$cfg $bc"; done
+done < "$OUT/bclist.txt" >> "$OUT/jobs.txt"
 echo "total runs: $(wc -l < "$OUT/jobs.txt")"
 
 xargs -P"$PAR" -n2 "$HERE/run-one.sh" < "$OUT/jobs.txt"

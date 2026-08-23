@@ -36,6 +36,21 @@ llvm::cl::opt<bool> DebugDumpSTPQueries(
 llvm::cl::opt<bool> IgnoreSolverFailures(
     "ignore-solver-failures", llvm::cl::init(false),
     llvm::cl::desc("Ignore any solver failures (default=off)"));
+
+// STP replaces a wide bit-vector operation by free result bits and pins them
+// lazily, refining only where a candidate model contradicts the operands
+// underneath. It is off in STP itself, and off here, because what it is worth
+// depends entirely on the floor: too high and it engages on nothing, too low
+// and it abstracts operations whose exact encoding was cheaper than the
+// rounds spent avoiding it. On this benchmark set the significand product of
+// a binary32 fp.mul is 24 to 33 bits wide, which is the range worth trying.
+//
+// Zero leaves it off, which is what STP does by default and what every
+// measurement before this used.
+llvm::cl::opt<unsigned> STPBVAbstractionWidth(
+    "stp-bv-abstraction-width", llvm::cl::init(0),
+    llvm::cl::desc("Operand width at or above which STP abstracts bit-vector "
+                   "operations and refines them by CEGAR (default=0, off)"));
 }
 
 #define vc_bvBoolExtract IAMTHESPAWNOFSATAN
@@ -98,6 +113,13 @@ STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
   // the pointers using vc_DeleteExpr.  By setting EXPRDELETE to 0
   // we restore the old behaviour.
   vc_setInterfaceFlags(vc, EXPRDELETE, 0);
+
+  if (STPBVAbstractionWidth > 0) {
+    vc_setInterfaceFlags(vc, BV_ABSTRACTION_WIDTH,
+                         (int)STPBVAbstractionWidth.getValue());
+    vc_setInterfaceFlags(vc, BV_EQ_ABSTRACTION, 1);
+    vc_setInterfaceFlags(vc, BV_TERM_ABSTRACTION, 1);
+  }
 
   make_division_total(vc);
 

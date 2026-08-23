@@ -43,6 +43,11 @@ STP_stp_minisat_LIB=${STP_MINISAT_LIB:-}
 STP_stp_cadical2_LIB=${STP_CADICAL2_LIB:-}
 STP_stp_cadical3_LIB=${STP_CADICAL3_LIB:-}
 STP_stp_cmsat_LIB=${STP_CMSAT_LIB:-}
+# A second STP source tree, for comparing one STP against another rather than
+# one SAT backend against another. The "-abs" configurations below also turn
+# on its bit-vector abstraction, which is off in STP itself and off in KLEE:
+# see --stp-bv-abstraction-width.
+STP_stp_new_LIB=${STP_NEW_LIB:-}
 # Extra directories the swapped-in STP itself needs (CryptoMiniSat is a shared
 # library, unlike the statically linked CaDiCaL and the installed MiniSat).
 STP_EXTRA_LIBDIRS=${STP_EXTRA_LIBDIRS:-}
@@ -56,6 +61,13 @@ Z3_z3_51_LIB=${Z3_51_LIB:-$HOME/clones/z3/master/build-gcc16-py311/libz3.so.5.1.
 case $CFG in
   stp)           BACKEND=stp; LIB=$STP_stp_LIB;          SONAME=libstp.so.2.4 ;;
   stp-minisat)   BACKEND=stp; LIB=$STP_stp_minisat_LIB;  SONAME=libstp.so.2.4 ;;
+  stp-new)       BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4 ;;
+  stp-new-abs24) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4
+                 EXTRA="--stp-bv-abstraction-width=24" ;;
+  stp-new-abs33) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4
+                 EXTRA="--stp-bv-abstraction-width=33" ;;
+  stp-new-abs53) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4
+                 EXTRA="--stp-bv-abstraction-width=53" ;;
   stp-cadical2)  BACKEND=stp; LIB=$STP_stp_cadical2_LIB; SONAME=libstp.so.2.4 ;;
   stp-cadical3)  BACKEND=stp; LIB=$STP_stp_cadical3_LIB; SONAME=libstp.so.2.4 ;;
   stp-cmsat)     BACKEND=stp; LIB=$STP_stp_cmsat_LIB;    SONAME=libstp.so.2.4 ;;
@@ -66,6 +78,8 @@ case $CFG in
   z3-51)  BACKEND=z3;  LIB=$Z3_z3_51_LIB;  SONAME=libz3.so ;;
   *) echo "unknown config: $CFG" >&2; exit 2 ;;
 esac
+
+EXTRA=${EXTRA:-}
 
 name=$(basename "$BC" .bc)
 out=$OUT/$CFG/$name
@@ -92,6 +106,7 @@ timeout -s KILL "$HARD" "$KLEE" \
     --libc=uclibc \
     --max-time="$SOFT" \
     --max-memory=4000 \
+    ${EXTRA:+$EXTRA} \
     --output-dir="$out" \
     "$BC" > "$out.log" 2>&1
 rc=$?
