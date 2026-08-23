@@ -31,6 +31,22 @@ JOBS=${JOBS:-$(nproc)}
 HOST_CC=${HOST_CC:-gcc-7}
 HOST_CXX=${HOST_CXX:-g++-7}
 
+# STP is C++17 and does not build with GCC 7, so it gets the system compiler.
+# That is safe because KLEE only ever talks to STP through its C interface
+# (stp/c_interface.h): no C++ types cross the boundary.  See STP_STDCXX below.
+STP_CC=${STP_CC:-cc}
+STP_CXX=${STP_CXX:-c++}
+# STP is upstream stp/stp; pin the commit that this was developed against.
+# Point STP_SRC at a local checkout to build that instead.
+STP_URL=${STP_URL:-https://github.com/stp/stp}
+STP_COMMIT=${STP_COMMIT:-97717546cfd064100b59d89ffc3c7f1438c5f1aa}
+STP_SRC=${STP_SRC:-$DEPS/stp}
+# Link KLEE against the libstdc++ that will actually be loaded at run time.
+# GCC 7 links against its own, older, copy, which lacks the GLIBCXX_3.4.26+
+# symbols that a libstp built by a current GCC needs -- so the link fails even
+# though the loader would resolve them from the system library just fine.
+STP_STDCXX=${STP_STDCXX:-/usr/lib64/libstdc++.so.6}
+
 # Where that GCC keeps crtbegin.o / libgcc, and its libstdc++ headers.  Clang
 # 3.4 cannot find either on its own on a modern distribution.
 GCC7_LIBDIR=${GCC7_LIBDIR:-$(${HOST_CC} -print-libgcc-file-name | xargs dirname)}
@@ -204,7 +220,55 @@ if [ ! -f "$DEPS/klee-uclibc/lib/libc.a" ]; then
 fi
 
 ###############################################################################
-# 6. KLEE itself
+# 6. STP, and the two dependencies it needs here
+#
+# STP gained a floating-point theory (SymFPU based) and a C API for it, so it
+# can serve as a second FP-capable solver alongside Z3.  It needs a SAT backend
+# -- none is bundled, and this machine has neither CaDiCaL nor CryptoMiniSat,
+# so MiniSat is built the way klee-float's own container did -- and LibBF,
+# which STP fetches and builds with its own pinned/checksummed script.  That
+# script writes into ./deps relative to the working directory, so it is run
+# from a scratch directory here rather than inside the STP checkout.
+###############################################################################
+if [ ! -f "$PREFIX/lib/libminisat.so" ]; then
+  cd "$DEPS"
+  [ -d minisat ] || git clone --depth 1 https://github.com/stp/minisat.git minisat
+  mkdir -p minisat-build && cd minisat-build
+  cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$DEPS/minisat"
+  make -j"$JOBS" && make install
+fi
+
+STP_CMAKE_DIR=$(dirname "$(find "$PREFIX" -name STPConfig.cmake 2>/dev/null | head -1)" 2>/dev/null || true)
+if [ ! -f "${STP_CMAKE_DIR:-/nonexistent}/STPConfig.cmake" ]; then
+  if [ ! -d "$STP_SRC" ]; then
+    git clone "$STP_URL" "$STP_SRC"
+    ( cd "$STP_SRC" && git checkout "$STP_COMMIT" )
+  fi
+
+  if [ ! -f "$DEPS/stp-deps/deps/libbf/libbf.a" ]; then
+    mkdir -p "$DEPS/stp-deps" && cd "$DEPS/stp-deps"
+    bash "$STP_SRC/scripts/deps/setup-libbf.sh"
+  fi
+
+  mkdir -p "$DEPS/stp-build" && cd "$DEPS/stp-build"
+  CC="$STP_CC" CXX="$STP_CXX" cmake \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+      -DCMAKE_PREFIX_PATH="$PREFIX" \
+      -DNOCRYPTOMINISAT=ON \
+      -DUSE_MINISAT=ON \
+      -DLIBBF_DIR="$DEPS/stp-deps/deps/libbf" \
+      -DBUILD_SHARED_LIBS=ON \
+      -DENABLE_TESTING=OFF \
+      -DENABLE_PYTHON_INTERFACE=OFF \
+      "$STP_SRC"
+  make -j"$JOBS" && make install
+  STP_CMAKE_DIR=$(dirname "$(find "$PREFIX" -name STPConfig.cmake | head -1)")
+fi
+
+###############################################################################
+# 7. KLEE itself
 ###############################################################################
 mkdir -p "$BUILD" && cd "$BUILD"
 CC="$HOST_CC" CXX="$HOST_CXX" "$CMAKE" \
@@ -213,6 +277,9 @@ CC="$HOST_CC" CXX="$HOST_CXX" "$CMAKE" \
   -DENABLE_SOLVER_Z3=ON \
   -DZ3_INCLUDE_DIRS="$PREFIX/include" \
   -DZ3_LIBRARIES="$PREFIX/lib/libz3.so" \
+  -DENABLE_SOLVER_STP=ON \
+  -DSTP_DIR="$STP_CMAKE_DIR" \
+  -DCMAKE_CXX_STANDARD_LIBRARIES="$STP_STDCXX" \
   -DENABLE_POSIX_RUNTIME=ON \
   -DENABLE_KLEE_UCLIBC=ON \
   -DKLEE_UCLIBC_PATH="$DEPS/klee-uclibc" \
@@ -232,3 +299,8 @@ echo
 echo "klee-float built: $BUILD/bin/klee"
 echo "Run the test suite with:"
 echo "  cd $BUILD && PATH=$DEPS/shim-bin:\$PATH make systemtests"
+echo
+echo "That exercises the default (Z3) backend. To run it against STP instead:"
+echo "  cd $BUILD && PATH=$DEPS/shim-bin:\$PATH $DEPS/pyenv/bin/lit -v \\"
+echo "    --param klee_opts=--solver-backend=stp \\"
+echo "    --param kleaver_opts=--solver-backend=stp test"

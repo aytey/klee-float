@@ -8,7 +8,8 @@ every workaround below is a concrete incompatibility between this code and a
 2026 Linux system, not a matter of taste.
 
 Verified on openSUSE Tumbleweed (glibc 2.43, GCC 11 default, CMake 4.1), where
-the full system test suite passes: **277 passed, 0 failed**.
+the full system test suite passes: **278 passed, 0 failed**. Both solver
+backends work on floating point — see "Floating point with STP" below.
 
 ## Quick start
 
@@ -20,7 +21,8 @@ Everything is built out-of-tree and nothing is installed system-wide:
 
 ```
 $ROOT/klee-float    this checkout
-$ROOT/deps          LLVM 3.4.2, Z3 4.5.0, klee-uclibc, CMake 3.31, lit, wrapper scripts
+$ROOT/deps          LLVM 3.4.2, Z3 4.5.0, STP (+ MiniSat, LibBF), klee-uclibc,
+                    CMake 3.31, lit, wrapper scripts
 $ROOT/klee-build    the KLEE build tree
 ```
 
@@ -46,6 +48,7 @@ no `python` binary. `deps/shim-bin/python` supplies one.
 | `python3` | LLVM 3.4's `configure`, klee-uclibc's `configure` and Z3's `mk_make.py` all want an interpreter; all three work under Python 3 via a `python` → `python3` shim. |
 | `git`, `curl`, `make`, `patch` | Fetching, patching and building the dependencies. |
 | ncurses and zlib development headers | LLVM, and klee-uclibc's `configure` probe. |
+| a current GCC (the default one), `bison`, `flex`, Boost program_options | Building STP, which is C++17 and so cannot use GCC 7. |
 
 ## Dependency versions, and why those
 
@@ -56,8 +59,83 @@ no `python` binary. `deps/shim-bin/python` supplies one.
 | klee-uclibc | `klee_uclibc_v1.0.0` | The branch named in `.travis.yml` for the LLVM 3.4 configurations. |
 | CMake | **3.31.6** (a local binary tarball) | See below — CMake 4 refuses to configure this project at all. |
 | lit | current, in a venv | The `utils/lit` in the LLVM 3.4 tree is Python 2 only. Modern lit runs this test suite fine. |
+| STP | upstream master, pinned | For its floating-point theory — see below. Built with the system compiler, along with MiniSat (a SAT backend; STP bundles none, and this machine has neither CaDiCaL nor CryptoMiniSat) and LibBF (fetched by STP's own pinned, checksummed script). |
 
 Only the X86 backend is built (`--enable-targets=host`); it is all KLEE needs.
+
+## Floating point with STP
+
+klee-float was written when STP had no floating-point theory, which is why its
+floating-point support is Z3-only and why the benchmarks all run with
+`--solver-backend=z3`. STP has one now (built on SymFPU) plus a C API for it, so
+`lib/Solver/STPBuilder.cpp` implements the same translation against STP and
+`--solver-backend=stp` works on floating-point programs.
+
+The translation deliberately mirrors `Z3Builder`, because the hard-won details
+live there:
+
+* Expressions are carried around as **bitvectors** and converted to STP's
+  floating-point sort only where a floating-point operation needs one.
+  `castToFloat()`/`castToBitVector()` do that on demand, keyed off
+  `vc_getExpWidth()`, which answers 0 for anything that is not a float. Every
+  operation that can be handed either sort — `eqExpr()`, `iteExpr()`, extraction,
+  the shifts, the bitvector arithmetic and the comparisons — coerces its
+  operands, because an `FAdd` result flowing into `x & 16` is ordinary in this
+  codebase.
+* **x87 fp80** is modelled as an IEEE format with a 15 bit exponent and a 64 bit
+  significand, whose widths sum to 79 rather than 80 because x87's integer bit is
+  explicit rather than hidden. Converting to and from it repacks the bit pattern
+  and emits a *side constraint* pinning that explicit bit, so that a model comes
+  back as a valid x87 fp80. `STPSolver` asserts those once the whole query is
+  built and clears them afterwards, exactly as the Z3 solver does.
+
+The API maps essentially one-to-one:
+
+| KLEE / Z3 | STP |
+| --- | --- |
+| `Z3_mk_fpa_to_fp_bv` | `vc_fpToFPFromIEEEBV` |
+| `Z3_mk_fpa_to_ieee_bv` | `vc_fpToIEEEBV` |
+| `Z3_mk_fpa_to_fp_float` | `vc_fpToFPFromFP` |
+| `Z3_mk_fpa_to_{u,s}bv` | `vc_fpTo{U,S}BVExpr` |
+| `Z3_mk_fpa_to_fp_{un,}signed` | `vc_fpToFPFrom{Unsigned,Signed}BV` |
+| `Z3_mk_fpa_{add,sub,mul,div,sqrt,abs}` | `vc_fp{Add,Sub,Mul,Div,Sqrt,Abs}Expr` |
+| `Z3_mk_fpa_{eq,lt,leq,gt,geq}` | `vc_fp{Eq,Lt,Leq,Gt,Geq}Expr` |
+| `Z3_mk_fpa_is_*` | `vc_fpIs*Expr` |
+| `Z3_mk_fpa_round_*` | `vc_fpRoundingMode(VC_RM_*)` |
+
+Z3 remains the default backend; nothing about the Z3 path changes.
+
+### Linking KLEE against STP
+
+STP is C++17 and will not build with GCC 7, so it is built with the system
+compiler while KLEE is still built with GCC 7. That is safe — KLEE talks to STP
+only through `stp/c_interface.h`, so no C++ type crosses the boundary — but the
+link needs one adjustment: GCC 7 resolves `-lstdc++` against its own, older,
+copy, which lacks the `GLIBCXX_3.4.26`+ symbols a current `libstp.so` needs, and
+the link fails even though the loader would resolve them from the system library
+at run time. The build therefore points the link at the libstdc++ that will
+actually be loaded:
+
+```
+-DCMAKE_CXX_STANDARD_LIBRARIES=/usr/lib64/libstdc++.so.6
+```
+
+### Running the tests against STP
+
+`make systemtests` exercises the default (Z3) backend. To run the same suite
+against STP:
+
+```sh
+cd $ROOT/klee-build && PATH=$ROOT/deps/shim-bin:$PATH $ROOT/deps/pyenv/bin/lit -v \
+  --param klee_opts=--solver-backend=stp \
+  --param kleaver_opts=--solver-backend=stp test
+```
+
+All 67 `test/Floats` tests pass under STP, as does the rest of the suite. The one
+test that reports a failure that way, `Solver/FastCexSolver.kquery`, is an
+artefact of the invocation rather than of STP: that test already passes
+`--solver-backend=dummy` itself, so injecting a second `--solver-backend` makes
+the option appear twice and KLEE's command line parser rejects it.
 
 ## What breaks on a modern system
 
@@ -248,13 +326,18 @@ Expected-output updates:
 
 ## Test suite status
 
+With the default (Z3) backend:
+
 ```
 Total Discovered Tests: 281
-  Passed           : 277
+  Passed           : 278
   Failed           :   0
-  Unsupported      :   2
+  Unsupported      :   1
   Expectedly Failed:   2
 ```
+
+With `--solver-backend=stp`: 277 passed, plus the `FastCexSolver.kquery`
+invocation artefact described above.
 
 ## Things that look tempting but are not
 
