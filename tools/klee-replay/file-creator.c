@@ -152,16 +152,20 @@ static int create_char_dev(const char *fname, exe_disk_file_t *dfile,
 
       fprintf(stderr, "note: pty slave: setting raw mode\n");
       {
-        struct termio mode;
-        
-        int res = ioctl(aslave, TCGETA, &mode);
+        /* This used to use the System V `struct termio' / TCGETA / TCSETA
+           interface, which glibc dropped in 2.42.  `struct termios' with
+           tcgetattr()/tcsetattr() is the POSIX equivalent and is available
+           everywhere. */
+        struct termios mode;
+
+        int res = tcgetattr(aslave, &mode);
         assert(!res);
         mode.c_iflag = IGNBRK;
         mode.c_oflag &= ~(OLCUC | ONLCR | OCRNL | ONLRET);
         mode.c_lflag = 0;
         mode.c_cc[VMIN] = 1;
         mode.c_cc[VTIME] = 0;
-        res = ioctl(aslave, TCSETA, &mode);
+        res = tcsetattr(aslave, TCSANOW, &mode);
         assert(res == 0);
       }
 
