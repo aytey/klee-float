@@ -34,6 +34,19 @@ OUT=${FP_BENCH_OUT:-$WORK/runs}
 SOFT=${FP_BENCH_SOFT_TIMEOUT:-60}
 HARD=${FP_BENCH_HARD_TIMEOUT:-150}
 
+# STP builds to compare, one per SAT backend. STP prefers CaDiCaL over
+# CryptoMiniSat over MiniSat when several are compiled in (UserDefinedFlags.h),
+# so each of these must be a build with exactly one enabled. Empty value => use
+# whatever KLEE was linked against.
+STP_stp_LIB=${STP_LIB:-}
+STP_stp_minisat_LIB=${STP_MINISAT_LIB:-}
+STP_stp_cadical2_LIB=${STP_CADICAL2_LIB:-}
+STP_stp_cadical3_LIB=${STP_CADICAL3_LIB:-}
+STP_stp_cmsat_LIB=${STP_CMSAT_LIB:-}
+# Extra directories the swapped-in STP itself needs (CryptoMiniSat is a shared
+# library, unlike the statically linked CaDiCaL and the installed MiniSat).
+STP_EXTRA_LIBDIRS=${STP_EXTRA_LIBDIRS:-}
+
 # Z3 builds to compare. Empty value => use whatever KLEE was linked against.
 Z3_z3_450_LIB=${Z3_450_LIB:-}
 Z3_z3_415_LIB=${Z3_415_LIB:-/usr/lib64/libz3.so.4.15}
@@ -41,12 +54,16 @@ Z3_z3_50_LIB=${Z3_50_LIB:-$HOME/clones/z3/master/build/libz3.so.5.0.0.0}
 Z3_z3_51_LIB=${Z3_51_LIB:-$HOME/clones/z3/master/build-gcc16-py311/libz3.so.5.1.0.0}
 
 case $CFG in
-  stp)      BACKEND=stp;      LIB="" ;;
-  bitwuzla) BACKEND=bitwuzla; LIB="" ;;
-  z3-450) BACKEND=z3;  LIB=$Z3_z3_450_LIB ;;
-  z3-415) BACKEND=z3;  LIB=$Z3_z3_415_LIB ;;
-  z3-50)  BACKEND=z3;  LIB=$Z3_z3_50_LIB ;;
-  z3-51)  BACKEND=z3;  LIB=$Z3_z3_51_LIB ;;
+  stp)           BACKEND=stp; LIB=$STP_stp_LIB;          SONAME=libstp.so.2.4 ;;
+  stp-minisat)   BACKEND=stp; LIB=$STP_stp_minisat_LIB;  SONAME=libstp.so.2.4 ;;
+  stp-cadical2)  BACKEND=stp; LIB=$STP_stp_cadical2_LIB; SONAME=libstp.so.2.4 ;;
+  stp-cadical3)  BACKEND=stp; LIB=$STP_stp_cadical3_LIB; SONAME=libstp.so.2.4 ;;
+  stp-cmsat)     BACKEND=stp; LIB=$STP_stp_cmsat_LIB;    SONAME=libstp.so.2.4 ;;
+  bitwuzla)      BACKEND=bitwuzla; LIB="" ;;
+  z3-450) BACKEND=z3;  LIB=$Z3_z3_450_LIB; SONAME=libz3.so ;;
+  z3-415) BACKEND=z3;  LIB=$Z3_z3_415_LIB; SONAME=libz3.so ;;
+  z3-50)  BACKEND=z3;  LIB=$Z3_z3_50_LIB;  SONAME=libz3.so ;;
+  z3-51)  BACKEND=z3;  LIB=$Z3_z3_51_LIB;  SONAME=libz3.so ;;
   *) echo "unknown config: $CFG" >&2; exit 2 ;;
 esac
 
@@ -60,8 +77,8 @@ rm -rf "$out"
 if [ -n "$LIB" ]; then
   libdir=$OUT/.solverlib/$CFG
   mkdir -p "$libdir"
-  ln -sf "$LIB" "$libdir/libz3.so"
-  export LD_LIBRARY_PATH=$libdir
+  ln -sf "$LIB" "$libdir/$SONAME"
+  export LD_LIBRARY_PATH=$libdir${STP_EXTRA_LIBDIRS:+:$STP_EXTRA_LIBDIRS}
 fi
 
 s=$(date +%s.%N)

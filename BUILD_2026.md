@@ -59,7 +59,7 @@ no `python` binary. `deps/shim-bin/python` supplies one.
 | klee-uclibc | `klee_uclibc_v1.0.0` | The branch named in `.travis.yml` for the LLVM 3.4 configurations. |
 | CMake | **3.31.6** (a local binary tarball) | See below — CMake 4 refuses to configure this project at all. |
 | lit | current, in a venv | The `utils/lit` in the LLVM 3.4 tree is Python 2 only. Modern lit runs this test suite fine. |
-| STP | upstream master, pinned | For its floating-point theory — see below. Built with the system compiler, along with MiniSat (a SAT backend; STP bundles none, and this machine has neither CaDiCaL nor CryptoMiniSat) and LibBF (fetched by STP's own pinned, checksummed script). |
+| STP | upstream master, pinned | For its floating-point theory — see below. Built with the system compiler, along with MiniSat (a SAT backend; STP bundles none) and LibBF (fetched by STP's own pinned, checksummed script). MiniSat is a deliberate choice, not a fallback: CaDiCaL and CryptoMiniSat were both measured and CaDiCaL is *slower* for STP here — see `FP_BENCH_2026.md`. Note STP prefers CaDiCaL over CryptoMiniSat over MiniSat when several are compiled in, so enable exactly one. |
 
 Only the X86 backend is built (`--enable-targets=host`); it is all KLEE needs.
 

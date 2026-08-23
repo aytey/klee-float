@@ -150,6 +150,36 @@ further errors reported by *every* configuration — solver-independent, so
 attributable to this 2026 environment rather than any backend. STP additionally
 reports `atof`, discussed below.
 
+### Which SAT backend for STP?
+
+STP bundles no SAT solver and picks a default by precedence — CaDiCaL, then
+CryptoMiniSat, then Riss, then MiniSat (`UserDefinedFlags.h`) — so a build with
+several enabled does not measure the one you think. Each configuration below is
+a build with exactly one enabled, swapped in at run time by pointing
+`libstp.so.2.4` at it.
+
+Per-query cost, on both workloads (the KLEE test suite figures are over the
+tests every configuration explored identically, median of three runs; the
+fp-bench figures are single runs under the 60s budget):
+
+| STP SAT backend | test suite ms/query | fp-bench ms/query |
+| --- | --- | --- |
+| **MiniSat** (2008) | 5.07 | **149.1** |
+| CryptoMiniSat 5.14 | **4.81** | 169.5 |
+| CaDiCaL 3.0.1 | 5.44 | 162.2 |
+| CaDiCaL 2.2.1 | 5.80 | 190.7 |
+| *(Bitwuzla, CaDiCaL 2.1.2 internally)* | *4.79* | *166.4* |
+
+**CaDiCaL is not an improvement for STP on this workload** — it is slower than
+MiniSat on both, and 2.2.1 is consistently the worst of the four. That is worth
+knowing because CaDiCaL is the modern default choice and is what Bitwuzla uses
+internally, so it is the natural thing to reach for. MiniSat and CryptoMiniSat
+trade places between the two workloads, which differ in per-query cost by a
+factor of about thirty, so neither is clearly ahead.
+
+The practical consequence is that the STP results reported here, built against
+MiniSat, are not handicapped by that choice.
+
 ### Comparing solvers fairly
 
 Because fp-bench exploration always diverges, the KLEE test suite is the better
