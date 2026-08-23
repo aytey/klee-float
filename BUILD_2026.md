@@ -120,6 +120,12 @@ actually be loaded:
 -DCMAKE_CXX_STANDARD_LIBRARIES=/usr/lib64/libstdc++.so.6
 ```
 
+### Benchmarks
+
+`FP_BENCH_2026.md` covers rebuilding the fp-bench floating-point suite this
+branch was evaluated on (the 86 benchmarks from the ASE 2017 paper) and running
+it across solver backends, along with the scripts in `scripts/fp-bench-2026/`.
+
 ### Running the tests against STP
 
 `make systemtests` exercises the default (Z3) backend. To run the same suite
