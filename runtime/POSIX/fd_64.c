@@ -107,8 +107,19 @@ int statfs(const char *path, struct statfs *buf) {
   return __fd_statfs(path, buf);
 }
 
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 30))
+/* glibc >= 2.30 declares getdents64() itself in <bits/dirent_ext.h> (pulled in
+   by <dirent.h> under _GNU_SOURCE), so we have to match its prototype exactly
+   or the definition below conflicts with that declaration. */
+ssize_t getdents64(int fd, void *dirp, size_t count) {
+  return __fd_getdents(fd, (struct dirent64*) dirp, count);
+}
+ssize_t __getdents64(int fd, void *dirp, size_t count)
+     __attribute__((alias("getdents64")));
+#else
 int getdents64(unsigned int fd, struct dirent *dirp, unsigned int count) {
   return __fd_getdents(fd, (struct dirent64*) dirp, count);
 }
 int __getdents64(unsigned int fd, struct dirent *dirp, unsigned int count)
      __attribute__((alias("getdents64")));
+#endif
