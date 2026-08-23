@@ -68,6 +68,13 @@ case $CFG in
                  EXTRA="--stp-bv-abstraction-width=33" ;;
   stp-new-abs53) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4
                  EXTRA="--stp-bv-abstraction-width=53" ;;
+  # ... and the same with the blocking-lemma allowance scaled by the operand
+  # width rather than flat, which is the configuration a set carrying both
+  # binary32 and binary64 multiplies is the right place to judge.
+  stp-new-abs24-rate) BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="--stp-bv-abstraction-width=24 --stp-bv-abstraction-value-divisor=8" ;;
+  stp-new-abs33-rate) BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="--stp-bv-abstraction-width=33 --stp-bv-abstraction-value-divisor=8" ;;
   stp-cadical2)  BACKEND=stp; LIB=$STP_stp_cadical2_LIB; SONAME=libstp.so.2.4 ;;
   stp-cadical3)  BACKEND=stp; LIB=$STP_stp_cadical3_LIB; SONAME=libstp.so.2.4 ;;
   stp-cmsat)     BACKEND=stp; LIB=$STP_stp_cmsat_LIB;    SONAME=libstp.so.2.4 ;;

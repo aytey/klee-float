@@ -436,3 +436,89 @@ issued **685 queries in 60s where Z3 5.0 and 5.1 managed 3**. Bitwuzla does not
 reach it either, for the same reason. The lesson for anyone re-running this is
 that an unexpected error against a spec is worth replaying natively before it is
 believed — in either direction.
+
+## STP's bit-vector abstraction, on this suite
+
+STP can replace a wide bit-vector operation by free result bits and pin them
+lazily by CEGAR. Four changes to that mechanism landed in STP
+(`aytey_20260823_cegar_lemmas`), and on a corpus of 39 hard floating-point
+queries dumped from `sqrt_klee_bug` they take it from **4.2x slower than not
+abstracting to 1.4x faster**, and from 30/39 queries answered inside 30s to
+39/39.
+
+On fp-bench as a whole they change nothing, and turning the abstraction on
+costs a quarter. Both statements are worth keeping, because the difference
+between them is the point.
+
+**KLEE never asked for the abstraction.** It is off in STP and
+`--stp-bv-abstraction-width` (added for this) is zero by default, so every
+earlier measurement in this file is of a code path that never ran, and the
+new STP with it off is the same solver as the old one. That is the control
+row below and it is what makes the rest readable.
+
+Three interleaved passes, 76 benchmarks every configuration ran to a normal
+halt in all three, solver time in seconds:
+
+| configuration | pass 2 | pass 3 | pass 4 | median | vs. off | queries | ms/query |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Bitwuzla (CaDiCaL 2.1.2) | 873.6 | 846.1 | 867.4 | **867.4** | 0.98x | 5996 | 144.7 |
+| STP + MiniSat, unchanged | 871.1 | 901.2 | 878.6 | **878.6** | 0.99x | 7646 | **114.9** |
+| STP + MiniSat, new, abstraction off | 898.4 | 879.5 | 886.9 | **886.9** | 1.00x | 7602 | 116.7 |
+| ... abstraction at 33 bits | 1082.9 | 1127.9 | 1130.4 | **1127.9** | 1.27x | 6884 | 163.8 |
+| ... abstraction at 53 bits | 1102.2 | 1097.1 | 1128.4 | **1102.2** | 1.24x | 6944 | 158.7 |
+
+So **STP and Bitwuzla finish level** on solver time, with STP 21% cheaper per
+query and issuing 27% more of them — the same shape as the earlier
+measurements in this file, now with the configurations interleaved rather
+than run one after another. And the abstraction is a 24-27% loss, with
+non-overlapping ranges.
+
+### Where the loss is, and why the two workloads disagree
+
+Not spread. Of the 234s the abstraction adds, **ten benchmarks account for
+all of it**, and the top of that list is `sqr_double` and `sqr_longdouble`:
+
+| benchmark | off | at 33 bits | queries (off / on) |
+| --- | --- | --- | --- |
+| `sqr_longdouble-flow` | 12.3s | 60.4s | 6 / 6 |
+| `sqr_double-noflow` | 11.5s | 54.1s | 4 / 4 |
+| `diction_style` | 8.3s | 42.3s | 34 / 34 |
+| `sqr_longdouble-noflow` | 46.7s | 75.6s | 4 / 3 |
+| `sqr_double-flow` | 4.5s | 22.2s | 6 / 6 |
+
+The query counts are the same, so this is per-query cost and not more
+exploration. These are **binary64 and x87 significand products — 53 and 64
+bits** — and they are exactly what the abstraction is aimed at. On 27 of the
+76 it is faster, saving 23s in total; on these five it loses 150s.
+
+That is the disagreement with the 39-query corpus in one line: **the corpus is
+entirely binary32**, so its abstracted multiplies are 24 to 33 bits, and it
+cannot see the case that dominates here. It is a caution about the corpus and
+not only about the abstraction — a 39-query benchmark drawn from one program
+is a fast signal, not a workload.
+
+The obvious suspect for the wide-operand loss is the blocking-lemma
+allowance: at 53 bits a flat 32 of them enumerate 32 of 2^106 operand pairs
+before the refinement gives up, which is 32 wasted solves.
+`--stp-bv-abstraction-value-divisor` makes that allowance `width/divisor`
+instead. It helps, and it does not rescue anything. One run of the five
+benchmarks above:
+
+| benchmark | off | at 33 | at 33, rate 8 |
+| --- | --- | --- | --- |
+| `sqr_double-noflow` | 6.8s | 56.8s | 34.5s |
+| `sqr_longdouble-flow` | 11.9s | 63.1s | 39.3s |
+| `sqr_double-flow` | 5.6s | 21.9s | 18.3s |
+| `sqr_longdouble-noflow` | 49.0s | 74.4s | 84.7s |
+| `diction_style` | 9.8s | 46.9s | 49.5s |
+
+Three of five improve by a quarter to a third, two get worse, and the
+abstraction stays three to six times worse than leaving it off in every one.
+This is the evidence the binary32 corpus could not provide, and it is not
+enough to move STP's default: the rate is a real effect on wide operands, but
+inside a configuration nobody should be running on this suite anyway.
+
+**The recommendation, therefore, is the default: leave it off.** The
+abstraction is worth having on a workload of a few expensive queries over
+narrow-significand floating point, which is what the corpus is and what this
+suite is not.

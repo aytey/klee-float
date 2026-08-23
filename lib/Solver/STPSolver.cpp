@@ -51,6 +51,19 @@ llvm::cl::opt<unsigned> STPBVAbstractionWidth(
     "stp-bv-abstraction-width", llvm::cl::init(0),
     llvm::cl::desc("Operand width at or above which STP abstracts bit-vector "
                    "operations and refines them by CEGAR (default=0, off)"));
+
+// How long the refinement enumerates operand values before giving up on an
+// abstracted multiply and encoding it exactly. STP's own default is a flat
+// count, whatever the operands' width; a nonzero divisor here makes it
+// width/divisor instead. What one of those lemmas rules out is one pair out
+// of 2^(2W), so a flat count means something quite different at 24 bits and
+// at 64, and this benchmark set has both.
+llvm::cl::opt<unsigned> STPBVAbstractionValueDivisor(
+    "stp-bv-abstraction-value-divisor", llvm::cl::init(0),
+    llvm::cl::desc("Scale STP's blocking-lemma allowance with the operand "
+                   "width, as width/divisor (default=0, use STP's flat "
+                   "allowance); only meaningful with "
+                   "--stp-bv-abstraction-width"));
 }
 
 #define vc_bvBoolExtract IAMTHESPAWNOFSATAN
@@ -119,6 +132,9 @@ STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
                          (int)STPBVAbstractionWidth.getValue());
     vc_setInterfaceFlags(vc, BV_EQ_ABSTRACTION, 1);
     vc_setInterfaceFlags(vc, BV_TERM_ABSTRACTION, 1);
+    if (STPBVAbstractionValueDivisor > 0)
+      vc_setInterfaceFlags(vc, BV_TERM_ABSTRACTION_VALUE_DIVISOR,
+                           (int)STPBVAbstractionValueDivisor.getValue());
   }
 
   make_division_total(vc);
