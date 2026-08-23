@@ -28,7 +28,8 @@
 namespace {
 llvm::cl::opt<std::string> BitwuzlaQueryDumpFile(
     "debug-bitwuzla-dump-queries", llvm::cl::init(""),
-    llvm::cl::desc("Dump Bitwuzla queries to the specified file"));
+    llvm::cl::desc("Dump Bitwuzla's SMT-LIBv2 representation of each query to "
+                   "the specified path"));
 }
 
 namespace klee {
@@ -165,6 +166,18 @@ bool BitwuzlaSolverImpl::internalRunSolver(
            ie = builder->sideConstraints.end();
        it != ie; ++it)
     bitwuzla_assert(bzla, *it);
+
+  if (!BitwuzlaQueryDumpFile.empty()) {
+    // Unlike Z3's dump, this uses only standard SMT-LIB -- Bitwuzla has no
+    // fp.to_ieee_bv -- so the result is portable to other solvers.
+    FILE *f = fopen(BitwuzlaQueryDumpFile.c_str(), "a");
+    if (f) {
+      fprintf(f, "; start Bitwuzla query\n(set-logic QF_ABVFP)\n");
+      bitwuzla_print_formula(bzla, "smt2", f, 10);
+      fprintf(f, "(check-sat)\n(exit)\n; end Bitwuzla query\n\n");
+      fclose(f);
+    }
+  }
 
   BitwuzlaResult result = bitwuzla_check_sat(bzla);
 

@@ -240,13 +240,61 @@ of 81 run pairings — and slower only on floating-point ones, where it loses 80
 of 81 pairings. The two effects roughly cancel over the whole suite, which is
 why the aggregate looked like a tie.
 
-So the work needed to make STP win outright is in its floating-point layer, not
-in KLEE, not in the SAT solver, and not in bitvector reasoning. The gap also
-widens with query difficulty — 1.21× on the test suite's small queries against
-about 1.6× on the fp-bench benchmarks that run to completion — which points at
-what reaches the bit-blaster (word-level rewriting and the size of the blasted
-FP circuits) rather than at a constant overhead. STP's floating-point support is
-also far younger than Bitwuzla's SymFPU integration, so there is likely room.
+### It is Bitwuzla's abstraction module
+
+Running the *same* queries through both solvers standalone settles it.
+`--debug-bitwuzla-dump-queries` writes Bitwuzla's SMT-LIBv2 form of each query,
+which unlike Z3's dump uses only standard operators — Z3 emits `fp.to_ieee_bv`,
+its own extension, which neither other solver parses — so it is portable to STP
+after rewriting SMT-LIB 2.6 `define-const` as `define-fun`.
+
+Over 39 such queries from `sqrt_klee_bug`, all three solving all 39, three
+repetitions:
+
+| Configuration | Total |
+| --- | --- |
+| Bitwuzla, abstraction **on** (default) | 64.5 / 73.2 s |
+| STP + MiniSat | 80.4 / 82.1 / 80.7 s |
+| Bitwuzla, abstraction **off** | 90.2 / 103.0 s |
+
+**With `--abstraction=false`, Bitwuzla is slower than STP.** Its entire lead
+comes from its abstraction module, which replaces wide bit-vector operations
+with abstractions refined on demand rather than bit-blasting them outright. The
+blasted CNF for one query shows the same thing:
+
+| Encoding | Variables | Clauses |
+| --- | --- | --- |
+| Bitwuzla, abstraction on | 45,010 | **142,659** |
+| STP + MiniSat | 41,556 | 174,505 |
+| Bitwuzla, abstraction off | 59,423 | 187,858 |
+
+Solve time tracks clause count monotonically, so this is "bigger circuit", not
+"same circuit, searched worse" — and **STP's own blasting is already better than
+Bitwuzla's full blast**. What STP lacks is the abstraction layer on top.
+
+The threshold makes the prediction testable: Bitwuzla abstracts bit-vector
+operations of width ≥ 33 (`--abstraction-bv-size`). So it should help on wide
+arithmetic and do nothing on narrow. Two minimal programs, one multiplying
+32-bit values and one 64-bit:
+
+| | STP | Bitwuzla on | Bitwuzla off |
+| --- | --- | --- | --- |
+| 32-bit multiply | **0.05s** | 0.06s | 0.06s |
+| 64-bit multiply | 0.13s | **0.04s** | 0.11s |
+
+Below the threshold abstraction is inert and STP is competitive; above it,
+abstraction is worth 2.75× and puts Bitwuzla 3× ahead. That is exactly the
+split seen across the suites: KLEE's integer queries are mostly 32-bit and
+narrower, so STP wins them, while floating-point blasting produces the wide
+multipliers inside `fp.mul`, `fp.div` and `fp.sqrt` on 24- and 53-bit
+significands, so Bitwuzla wins those.
+
+So the work needed to make STP win outright is **lazy abstraction and
+refinement of wide bit-vector arithmetic** — not KLEE's integration, not the
+SAT solver, and not STP's blasting or its bitvector reasoning, all of which are
+already competitive or better. STP already has abstraction-refinement machinery
+(`AbsRefineCounterExample/`) applied to arrays; extending that idea to wide
+arithmetic is the concrete work item.
 
 ### How much of this is noise?
 
