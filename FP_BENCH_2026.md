@@ -160,11 +160,12 @@ a build with exactly one enabled, swapped in at run time by pointing
 
 Per-query cost, on both workloads (the KLEE test suite figures are over the
 tests every configuration explored identically, median of three runs; the
-fp-bench figures are single runs under the 60s budget):
+fp-bench figures are single runs under the 60s budget — see the warning below
+about reading that column):
 
-| STP SAT backend | test suite ms/query | fp-bench ms/query |
+| STP SAT backend | test suite ms/query | fp-bench ms/query (whole set) |
 | --- | --- | --- |
-| **MiniSat** (2008) | 5.07 | **149.1** |
+| **MiniSat** (2008) | 5.07 | 149.1 |
 | CryptoMiniSat 5.14 | **4.81** | 169.5 |
 | CaDiCaL 3.0.1 | 5.44 | 162.2 |
 | CaDiCaL 2.2.1 | 5.80 | 190.7 |
@@ -174,33 +175,64 @@ fp-bench figures are single runs under the 60s budget):
 MiniSat on both, and 2.2.1 is consistently the worst of the four. That is worth
 knowing because CaDiCaL is the modern default choice and is what Bitwuzla uses
 internally, so it is the natural thing to reach for. MiniSat and CryptoMiniSat
-trade places between the two workloads, which differ in per-query cost by a
-factor of about thirty, so neither is clearly ahead.
+trade places between the two workloads, so neither is clearly ahead.
 
 The practical consequence is that the STP results reported here, built against
 MiniSat, are not handicapped by that choice.
 
 ### Comparing solvers fairly
 
-Because fp-bench exploration always diverges, the KLEE test suite is the better
-instrument for a like-for-like solver comparison: **252 of its 260 tests explore
-identically** across Z3, STP and Bitwuzla. On exactly those tests, with
-`--use-forked-solver=false` throughout:
+**A whole-set `ms/query` figure over fp-bench is not a per-query cost, and it
+inverts the answer.** Of the 86 benchmarks, 20 are budget-bounded for one
+backend or the other. On those, solver time is pinned near the budget whatever
+the solver, so `ms/query` degenerates into the reciprocal of throughput — and
+because they are also the *hardest* benchmarks, they dominate the aggregate.
+Splitting them out (three repetitions each, medians):
 
-| Solver | Queries | Solver time | ms/query |
+| | STP+MiniSat | Bitwuzla | queries (STP / Bwz) |
 | --- | --- | --- | --- |
-| STP master | 1650 | **7.07s** | **4.3** |
-| Bitwuzla 0.9.1-dev | 1656 | 7.62s | 4.6 |
-| Z3 4.5.0 | 1650 | 31.35s | 19.0 |
+| 66 never budget-bounded | 130.2 ms/query | **82.8 ms/query** | 2037 / 2033 |
+| 20 budget-bounded | **157.2 ms/query** | 203.7 ms/query | 6102 / 4565 |
+| whole set | **150.5 ms/query** | 166.4 ms/query | — |
 
-Identical work, and the query counts agree to within 0.4% — the six-query
-difference comes from eight tests where a different model changes what the
-counterexample cache can reuse. So there is no query-issuance inefficiency in
-any backend to tune away; the only real lever is cost per query, and on equal
-work **STP is about 7% ahead of Bitwuzla**, with both roughly 4× ahead of Z3.
+On the 66 that run to completion the query counts match to 0.2%, so that row is
+a genuine like-for-like per-query cost, and **Bitwuzla is about 1.6× faster
+than STP+MiniSat**. On the 20 hardest, both spend the budget and STP gets
+through 34% more queries. The whole-set row favours STP only because the second
+group dominates it.
 
-The reversal against the fp-bench totals is exactly the fixed-budget effect: a
-faster solver does more work, and doing more work costs more solver time.
+Three query difficulty regimes, then, and they do not agree:
+
+| Workload | Typical cost | Result |
+| --- | --- | --- |
+| KLEE test suite | ~5 ms/query | indistinguishable (see below) |
+| fp-bench, completing | ~100 ms/query | Bitwuzla ~1.6× faster |
+| fp-bench, budget-bound | hardest | STP ~34% more queries in the same time |
+
+### How much of this is noise?
+
+Enough to have misled an earlier version of this document, which claimed STP was
+"about 7% ahead" of Bitwuzla on the test suite. It is not. Two independent
+measurement sets of the *same* STP+MiniSat configuration differed by 7.0%, so
+that gap was inside the noise floor.
+
+Over nine repetitions each, on the 238 tests explored identically by both:
+
+| Solver | Median | Mean | SD | Range |
+| --- | --- | --- | --- | --- |
+| STP+MiniSat | 7.13s | 7.15s | 0.46s (6.5%) | 6.58–8.20 |
+| Bitwuzla | 7.36s | 7.35s | 0.42s (5.7%) | 6.88–8.18 |
+
+A 3.1% median difference, STP faster in 64% of the 81 run pairings, ranges
+fully overlapping: **not a real difference** at this query size. Both remain
+roughly 4× faster than Z3 4.5.0, which is far outside the noise.
+
+Because fp-bench exploration always diverges, the test suite is the better
+instrument for *identical-work* comparison — 252 of its 260 tests explore
+identically across Z3, STP and Bitwuzla, with query counts agreeing to within
+0.4%. So there is no query-issuance inefficiency in any backend to tune away;
+the only lever is cost per query, and which solver wins there depends on how
+hard the queries are.
 
 ### The `atof` result
 
