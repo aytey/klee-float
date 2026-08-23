@@ -26,6 +26,11 @@
 #include <string>
 
 namespace {
+llvm::cl::opt<bool> BitwuzlaAbstraction(
+    "bitwuzla-abstraction", llvm::cl::init(true),
+    llvm::cl::desc("Use Bitwuzla's bit-vector abstraction (default=on, which "
+                   "is Bitwuzla's own default)"));
+
 llvm::cl::opt<std::string> BitwuzlaQueryDumpFile(
     "debug-bitwuzla-dump-queries", llvm::cl::init(""),
     llvm::cl::desc("Dump Bitwuzla's SMT-LIBv2 representation of each query to "
@@ -141,6 +146,14 @@ bool BitwuzlaSolverImpl::internalRunSolver(
   BitwuzlaOptions *options = bitwuzla_options_new();
   // KLEE needs counter-examples, not just satisfiability.
   bitwuzla_set_option(options, BITWUZLA_OPT_PRODUCE_MODELS, 1);
+
+  // Bitwuzla's own bit-vector abstraction, on by default in Bitwuzla and
+  // therefore on in every measurement here so far. Turning it off is how to
+  // ask what it is actually worth on this workload rather than on
+  // Bitwuzla's own; the same question STP's --stp-bv-abstraction-width asks
+  // from the other side.
+  if (!BitwuzlaAbstraction)
+    bitwuzla_set_option(options, BITWUZLA_OPT_ABSTRACTION, 0);
   if (timeout > 0.0) {
     // Per-query wall clock limit, in milliseconds.
     bitwuzla_set_option(options, BITWUZLA_OPT_TIME_LIMIT_PER,

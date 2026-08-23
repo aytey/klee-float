@@ -62,6 +62,28 @@ case $CFG in
   stp)           BACKEND=stp; LIB=$STP_stp_LIB;          SONAME=libstp.so.2.4 ;;
   stp-minisat)   BACKEND=stp; LIB=$STP_stp_minisat_LIB;  SONAME=libstp.so.2.4 ;;
   stp-new)       BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4 ;;
+  # STP driven the way it was before --stp-incremental existed: its automatic
+  # engagement switches to the persistent incremental driver from the third
+  # query onwards. Kept as a configuration so the change can be measured.
+  # STP's incremental driver taking over at query N. "inc" is where STP's own
+  # policy puts an embedder (the third query), i.e. what KLEE did before this
+  # was reachable; "batch" never engages.
+  stp-new-inc)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=3" ;;
+  stp-new-at8)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=8" ;;
+  stp-new-at32)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=32" ;;
+  stp-new-at128) BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=128" ;;
+  stp-new-at16)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=16" ;;
+  stp-new-at24)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=24" ;;
+  stp-new-at48)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=48" ;;
+  stp-new-at64)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-incremental-engage-at=64" ;;
   stp-new-abs24) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4
                  EXTRA="--stp-bv-abstraction-width=24" ;;
   stp-new-abs33) BACKEND=stp; LIB=$STP_stp_new_LIB;      SONAME=libstp.so.2.4

@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -32,6 +33,42 @@ namespace {
 llvm::cl::opt<bool> DebugDumpSTPQueries(
     "debug-dump-stp-queries", llvm::cl::init(false),
     llvm::cl::desc("Dump every STP query to stderr (default=off)"));
+
+// Where a query's time actually goes. KLEE's own QueryTime covers the whole
+// call -- translating the KLEE expression into STP's C API, asserting it, the
+// solve, and reading the counterexample back -- so a solver that looks slow
+// there may not be solving slowly at all.
+// STP has two ways of deciding a query: the batch pipeline, which simplifies
+// the whole formula and then bit-blasts it, and a persistent incremental
+// driver that keeps one solver across vc_push/vc_pop. KLEE pushes and pops
+// per query, so STP's automatic engagement switches to the incremental driver
+// from the third query onwards and stays there.
+//
+// That is the wrong trade for KLEE. Each of its queries is independent -- the
+// constraint set is asserted and retracted whole -- so the incremental driver
+// keeps state across queries that share nothing, and gives up the batch
+// simplifications in return. On floating-point queries it costs about three
+// times the solve time.
+// Which query STP's incremental driver takes over on. STP's own default for
+// an embedder is the third: the C API has no set-logic, so it cannot claim
+// the longer threshold a sweep chose for pure bit-vector sessions, and every
+// KLEE query from the third onwards has therefore been decided incrementally.
+//
+// Neither extreme is right. Over fp-bench the two modes come within 2% of
+// each other in total and are wildly apart per benchmark -- batch is 6x
+// better on sparse_matrices_klee_bug, incremental 3.4x better on
+// sort_smallest_klee -- so what this really selects is which sessions get
+// which, and the number of queries alone does not predict the winner.
+llvm::cl::opt<int> STPIncrementalEngageAt(
+    "stp-incremental-engage-at", llvm::cl::init(0),
+    llvm::cl::desc("Query ordinal at which STP's incremental driver takes "
+                   "over: 0 never (default), N on the Nth query, -1 to leave "
+                   "STP's own policy alone"));
+
+llvm::cl::opt<bool> DebugSTPPhaseTiming(
+    "debug-stp-phase-timing", llvm::cl::init(false),
+    llvm::cl::desc("Report per-query build/assert and solve times for STP "
+                   "(default=off)"));
 
 llvm::cl::opt<bool> IgnoreSolverFailures(
     "ignore-solver-failures", llvm::cl::init(false),
@@ -81,6 +118,10 @@ static const unsigned shared_memory_size = 1 << 16;
 static const unsigned shared_memory_size = 1 << 20;
 #endif
 
+static long elapsedMillis(const struct timeval &a, const struct timeval &b) {
+  return (b.tv_sec - a.tv_sec) * 1000L + (b.tv_usec - a.tv_usec) / 1000L;
+}
+
 static void stp_error_handler(const char *err_msg) {
   fprintf(stderr, "error: STP Error: %s\n", err_msg);
   abort();
@@ -126,6 +167,11 @@ STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
   // the pointers using vc_DeleteExpr.  By setting EXPRDELETE to 0
   // we restore the old behaviour.
   vc_setInterfaceFlags(vc, EXPRDELETE, 0);
+
+  // See STPIncrementalEngageAt above; negative leaves STP's own policy alone.
+  if (STPIncrementalEngageAt >= 0)
+    vc_setInterfaceFlags(vc, INCREMENTAL_AUTO_ENGAGE_AT,
+                         STPIncrementalEngageAt.getValue());
 
   if (STPBVAbstractionWidth > 0) {
     vc_setInterfaceFlags(vc, BV_ABSTRACTION_WIDTH,
@@ -228,7 +274,12 @@ runAndGetCex(::VC vc, STPBuilder *builder, ::VCExpr q,
              std::vector<std::vector<unsigned char> > &values,
              bool &hasSolution) {
   // XXX I want to be able to timeout here, safely
+  struct timeval qStart, qEnd;
+  gettimeofday(&qStart, NULL);
   hasSolution = !vc_query(vc, q);
+  gettimeofday(&qEnd, NULL);
+  if (DebugSTPPhaseTiming)
+    klee_warning("STP query: vc_query %ldms", elapsedMillis(qStart, qEnd));
 
   if (hasSolution) {
     values.reserve(objects.size());
@@ -383,6 +434,8 @@ bool STPSolverImpl::computeInitialValues(
   ++stats::queries;
   ++stats::queryCounterexamples;
 
+  struct timeval phase0, phase1, phase2;
+  gettimeofday(&phase0, NULL);
   ExprHandle stp_e = builder->construct(query.expr);
 
   // Assert any side constraints generated while building the query (see
@@ -395,11 +448,25 @@ bool STPSolverImpl::computeInitialValues(
     vc_assertFormula(vc, *it);
 
   if (DebugDumpSTPQueries) {
-    char *buf;
-    unsigned long len;
-    vc_printQueryStateToBuffer(vc, stp_e, &buf, &len, false);
-    klee_warning("STP query:\n%.*s\n", (unsigned)len, buf);
+    // SMT-LIB2, not the CVC presentation language. vc_printQueryStateToBuffer
+    // goes through PL_Print, which predates the floating-point theory and
+    // refuses it with a fatal error -- so this option aborted KLEE on exactly
+    // the queries anyone dumping floating-point queries wants to see. What
+    // comes back is a self-contained script: the asserted constraints and the
+    // negated query, ready to re-run through `stp --SMTLIB2`.
+    //
+    // The string is deliberately not freed. Its contract says the caller
+    // owns it, but STP links a vendored mimalloc that replaces malloc and
+    // free inside libstp, so the buffer did not come from the allocator this
+    // translation unit's free() belongs to -- handing it back aborted the
+    // process on the first query dumped. One leaked string per query, in a
+    // debugging option that prints every query to stderr, is the cheaper
+    // side of that trade.
+    if (char *smt = vc_printSMTLIB2(vc, vc_notExpr(vc, stp_e)))
+      klee_warning("STP query:\n%s\n", smt);
   }
+
+  gettimeofday(&phase1, NULL);
 
   bool success;
   if (useForkedSTP) {
@@ -418,6 +485,12 @@ bool STPSolverImpl::computeInitialValues(
       ++stats::queriesInvalid;
     else
       ++stats::queriesValid;
+  }
+
+  if (DebugSTPPhaseTiming) {
+    gettimeofday(&phase2, NULL);
+    klee_warning("STP query: build+assert %ldms, solve+cex %ldms",
+                 elapsedMillis(phase0, phase1), elapsedMillis(phase1, phase2));
   }
 
   vc_pop(vc);
