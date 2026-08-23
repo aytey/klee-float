@@ -522,3 +522,78 @@ inside a configuration nobody should be running on this suite anyway.
 abstraction is worth having on a workload of a few expensive queries over
 narrow-significand floating point, which is what the corpus is and what this
 suite is not.
+
+## STP beats Bitwuzla once it stops solving incrementally
+
+STP has two ways of deciding a query: a batch pipeline that simplifies the
+whole formula and then bit-blasts it, and a persistent incremental driver
+that keeps one solver alive across `vc_push`/`vc_pop`. It switches from the
+first to the second automatically, and for an embedder that happens on the
+**third query** -- the C API has no `set-logic`, so it cannot claim the
+longer threshold STP's own sweep chose for pure bit-vector sessions.
+
+KLEE pushes and pops per query, so every KLEE query from the third onwards
+has been decided by the incremental driver. Nobody chose that, and it is
+wrong here often enough to decide the whole comparison.
+
+Per benchmark the two modes are three to six times apart **in both
+directions**, with identical instruction and query counts -- the same
+exploration either way:
+
+| benchmark | incremental | batch |
+| --- | --- | --- |
+| `sparse_matrices_klee_bug` | 59.5s | **9.9s** |
+| `libmatheval_sym_f` | 35.8s | **9.0s** |
+| `sqr_longdouble-noflow` | 49.8s | **17.0s** |
+| `vectors_klee` | 34.5s | **11.2s** |
+| `sort_smallest_klee` | **18.1s** | 60.9s |
+| `sort_smallest_klee_bug` | **26.6s** | 60.2s |
+
+Neither extreme wins overall -- always-batch and always-incremental finish
+within 2% of each other -- so what the threshold really selects is which
+sessions get which. The number of queries does not predict the winner
+(`libmatheval_sym_f` has 69 and wants batch; `sqr_longdouble-flow` has 6 and
+wants the driver), and picking correctly per session would be worth about
+another 13%.
+
+`--stp-incremental-engage-at` exposes the threshold, and **32 is the
+default**: the value STP's own sweep chose for bit-vector sessions and
+withholds from embedders only because the C API cannot see a logic.
+
+Three interleaved passes, 78 benchmarks every configuration ran to a normal
+halt in all three, solver time:
+
+| configuration | pass A | pass B | pass C | median | range |
+| --- | --- | --- | --- | --- | --- |
+| Bitwuzla | 1026.0 | 1029.6 | 988.8 | **1026.0s** | 989–1030 |
+| STP, engage at 3 (before this) | 1006.8 | 1028.9 | 1002.3 | **1006.8s** | 1002–1029 |
+| **STP, engage at 32** | 968.3 | 942.5 | 940.6 | **942.5s** | **941–968** |
+| STP, engage at 48 | 952.0 | 971.9 | 930.6 | 952.0s | 931–972 |
+
+**STP is 8.1% faster than Bitwuzla, and the ranges do not overlap.** Before
+this the two were level. 48 is indistinguishable from 32; 32 has the better
+median and is the value STP already believes in.
+
+Nothing about what KLEE decides changes: 31 true positives, 8 unexpected and
+3 missed under every configuration in every pass, and KLEE's own suite is
+278 passed / 0 failed.
+
+### What is left
+
+STP still loses badly on a handful of queries, and they are not spread out --
+the ten worst account for 127s of the 140s it gives away:
+
+| benchmark | STP @32 | Bitwuzla |
+| --- | --- | --- |
+| `nan_longdouble` | 15.5s | **0.9s** |
+| `nan_double` | 10.8s | **0.5s** |
+| `sqr_longdouble-noflow` | 18.3s | **1.1s** |
+| `sqr_longdouble-flow` | 25.6s | **4.6s** |
+| `libmatheval_sym_f` | 32.1s | **10.3s** |
+
+Two different problems are mixed together there. `libmatheval_sym_f` and
+`sparse_matrices_klee_bug` are the threshold mis-assigning a session -- both
+want batch and both have more than 32 queries, so an adaptive policy would
+take them. The `nan_*` and `sqr_longdouble` rows are a real solver gap on
+fp80 and binary64: seventeen to twenty times, on queries that are about NaN
+propagation and about `sqrt(x*x)`.

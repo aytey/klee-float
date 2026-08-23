@@ -59,8 +59,24 @@ llvm::cl::opt<bool> DebugDumpSTPQueries(
 // better on sparse_matrices_klee_bug, incremental 3.4x better on
 // sort_smallest_klee -- so what this really selects is which sessions get
 // which, and the number of queries alone does not predict the winner.
+//
+// Thirty-two, which is the threshold STP's own sweep chose for pure
+// bit-vector sessions and which it withholds from embedders only because the
+// C API cannot see a set-logic. Measured over fp-bench, three interleaved
+// passes, on the 78 benchmarks every configuration ran to a normal halt:
+//
+//   Bitwuzla                     1026.0s  (989-1030)
+//   STP, engage at 32             942.5s  (941-968)
+//   STP, engage at 48             952.0s  (931-972)
+//   STP, engage at 3 (STP-s own) 1006.8s
+//
+// Ranges do not overlap: this is what puts STP 8% ahead of Bitwuzla on the
+// suite, where before it was level. Bugs found are identical under every
+// setting, so nothing here changes what KLEE decides -- only how long it
+// takes. 48 is indistinguishable; 32 has the better median and is the value
+// STP already believes in.
 llvm::cl::opt<int> STPIncrementalEngageAt(
-    "stp-incremental-engage-at", llvm::cl::init(0),
+    "stp-incremental-engage-at", llvm::cl::init(32),
     llvm::cl::desc("Query ordinal at which STP's incremental driver takes "
                    "over: 0 never (default), N on the Nth query, -1 to leave "
                    "STP's own policy alone"));
