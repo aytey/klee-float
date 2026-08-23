@@ -21,7 +21,7 @@ PAR=${FP_BENCH_PARALLEL:-8}
 
 CONFIGS=("$@")
 if [ ${#CONFIGS[@]} -eq 0 ]; then
-  CONFIGS=(z3-450 z3-415 z3-50 z3-51 stp)
+  CONFIGS=(z3-450 z3-415 z3-50 z3-51 stp bitwuzla)
 fi
 
 INVOKE=$BUILD/issta_invocation_info.yml

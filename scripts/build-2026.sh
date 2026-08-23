@@ -41,6 +41,14 @@ STP_CXX=${STP_CXX:-c++}
 STP_URL=${STP_URL:-https://github.com/stp/stp}
 STP_COMMIT=${STP_COMMIT:-97717546cfd064100b59d89ffc3c7f1438c5f1aa}
 STP_SRC=${STP_SRC:-$DEPS/stp}
+# Bitwuzla, like STP, is reached only through its C API. It is not built here:
+# its own build fetches dependencies and wants meson/ninja, so point these at an
+# existing checkout (a shared libbitwuzla and the directory containing
+# bitwuzla/c/bitwuzla.h). Leave BITWUZLA_LIB unset to build without it.
+BITWUZLA_SRC=${BITWUZLA_SRC:-$HOME/clones/bitwuzla/main}
+BITWUZLA_LIB=${BITWUZLA_LIB:-$BITWUZLA_SRC/build/src/libbitwuzla.so}
+BITWUZLA_INCLUDE=${BITWUZLA_INCLUDE:-$BITWUZLA_SRC/include}
+
 # Link KLEE against the libstdc++ that will actually be loaded at run time.
 # GCC 7 links against its own, older, copy, which lacks the GLIBCXX_3.4.26+
 # symbols that a libstp built by a current GCC needs -- so the link fails even
@@ -270,8 +278,19 @@ fi
 ###############################################################################
 # 7. KLEE itself
 ###############################################################################
+BITWUZLA_ARGS=()
+if [ -f "$BITWUZLA_LIB" ] && [ -f "$BITWUZLA_INCLUDE/bitwuzla/c/bitwuzla.h" ]; then
+  BITWUZLA_ARGS=(-DENABLE_SOLVER_BITWUZLA=ON
+                 -DBitwuzla_LIBRARIES="$BITWUZLA_LIB"
+                 -DBitwuzla_INCLUDE_DIRS="$BITWUZLA_INCLUDE")
+else
+  echo "Bitwuzla not found at $BITWUZLA_LIB -- building without it"
+  BITWUZLA_ARGS=(-DENABLE_SOLVER_BITWUZLA=OFF)
+fi
+
 mkdir -p "$BUILD" && cd "$BUILD"
 CC="$HOST_CC" CXX="$HOST_CXX" "$CMAKE" \
+  "${BITWUZLA_ARGS[@]}" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DENABLE_KLEE_ASSERTS=ON \
   -DENABLE_SOLVER_Z3=ON \
@@ -300,7 +319,7 @@ echo "klee-float built: $BUILD/bin/klee"
 echo "Run the test suite with:"
 echo "  cd $BUILD && PATH=$DEPS/shim-bin:\$PATH make systemtests"
 echo
-echo "That exercises the default (Z3) backend. To run it against STP instead:"
+echo "That exercises the default (Z3) backend. For STP or Bitwuzla instead:"
 echo "  cd $BUILD && PATH=$DEPS/shim-bin:\$PATH $DEPS/pyenv/bin/lit -v \\"
-echo "    --param klee_opts=--solver-backend=stp \\"
+echo "    --param klee_opts='--solver-backend=stp --use-forked-solver=false' \\"
 echo "    --param kleaver_opts=--solver-backend=stp test"

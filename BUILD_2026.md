@@ -63,13 +63,16 @@ no `python` binary. `deps/shim-bin/python` supplies one.
 
 Only the X86 backend is built (`--enable-targets=host`); it is all KLEE needs.
 
-## Floating point with STP
+## Floating point with STP and Bitwuzla
 
 klee-float was written when STP had no floating-point theory, which is why its
 floating-point support is Z3-only and why the benchmarks all run with
 `--solver-backend=z3`. STP has one now (built on SymFPU) plus a C API for it, so
 `lib/Solver/STPBuilder.cpp` implements the same translation against STP and
 `--solver-backend=stp` works on floating-point programs.
+
+`lib/Solver/Bitwuzla{Builder,Solver}.cpp` add a third FP-capable backend,
+`--solver-backend=bitwuzla`. All three pass the whole test suite.
 
 The translation deliberately mirrors `Z3Builder`, because the hard-won details
 live there:
@@ -103,7 +106,43 @@ The API maps essentially one-to-one:
 | `Z3_mk_fpa_is_*` | `vc_fpIs*Expr` |
 | `Z3_mk_fpa_round_*` | `vc_fpRoundingMode(VC_RM_*)` |
 
-Z3 remains the default backend; nothing about the Z3 path changes.
+Z3 remains the default backend and nothing about the Z3 path changes — but note
+that this took a fix. `CmdLineOptions.cpp` picked the default with an `#ifdef`
+chain that tested `ENABLE_STP` first, so merely *building* with STP enabled
+silently made STP the default for any invocation without `--solver-backend`.
+Since this fork's floating-point work was developed and published against Z3,
+the chain now prefers Z3 when it is available.
+
+### What Bitwuzla needs that Z3 and STP did not
+
+Bitwuzla implements the SMT-LIB floating-point theory faithfully, which means it
+has **no float-to-bits operation**: `fp.to_ieee_bv` is a Z3 extension. So
+`castToBitVector()` introduces a bitvector variable and constrains it, as a side
+constraint, to reinterpret as the float. Two consequences:
+
+* The variable is **cached per float term**. Casting the same float twice must
+  not yield two variables that a model could give different bits.
+* The constraint leaves **the bits of a NaN free**, because every NaN encoding
+  reinterprets to the same NaN value. KLEE's own constant folding produces one
+  specific encoding (`ConstantExpr::GetNaN()`, via `--single-repr-for-nan`), and
+  Z3's `fp.to_ieee_bv` canonicalises to match it — so leaving it free yields
+  models KLEE disagrees with, and `IndependentSolver`'s
+  `assertCreatedPointEvaluatesToTrue` fires. `Floats/fneg.c` and the `fabs`
+  tests catch it. The NaN case is therefore pinned to that same encoding.
+
+Two smaller differences, both caught by the test suite:
+
+* Bitwuzla **rejects a bitvector value that does not fit its sort**, where Z3
+  truncates silently. `bvMinusOne()` asks for `~0` at every width, so the
+  constant helpers narrow explicitly.
+* KLEE overshifts an arithmetic right shift **to zero**, whereas `bvashr`
+  saturates to the sign bit, so both shift paths guard for it.
+  (`Solver/overshift-aright-by-constant.kquery`.)
+
+Bitwuzla is not built by `scripts/build-2026.sh`: its own build fetches
+dependencies and wants meson/ninja. Point `BITWUZLA_SRC` (or `BITWUZLA_LIB` and
+`BITWUZLA_INCLUDE`) at an existing checkout; the build proceeds without it if
+they are absent.
 
 ### Linking KLEE against STP
 
@@ -126,22 +165,27 @@ actually be loaded:
 branch was evaluated on (the 86 benchmarks from the ASE 2017 paper) and running
 it across solver backends, along with the scripts in `scripts/fp-bench-2026/`.
 
-### Running the tests against STP
+### Running the tests against STP or Bitwuzla
 
 `make systemtests` exercises the default (Z3) backend. To run the same suite
-against STP:
+against another:
 
 ```sh
 cd $ROOT/klee-build && PATH=$ROOT/deps/shim-bin:$PATH $ROOT/deps/pyenv/bin/lit -v \
-  --param klee_opts=--solver-backend=stp \
+  --param klee_opts='--solver-backend=stp --use-forked-solver=false' \
   --param kleaver_opts=--solver-backend=stp test
 ```
 
-All 67 `test/Floats` tests pass under STP, as does the rest of the suite. The one
-test that reports a failure that way, `Solver/FastCexSolver.kquery`, is an
-artefact of the invocation rather than of STP: that test already passes
-`--solver-backend=dummy` itself, so injecting a second `--solver-backend` makes
-the option appear twice and KLEE's command line parser rejects it.
+`--use-forked-solver=false` matters for a fair comparison: it defaults to *on*,
+but `CoreSolver.cpp` passes it only to `STPSolver`, so STP would fork a process
+per query while Z3 and Bitwuzla run in-process.
+
+All 67 `test/Floats` tests pass under each backend, as does the rest of the
+suite. The one test that reports a failure that way,
+`Solver/FastCexSolver.kquery`, is an artefact of the invocation rather than of
+any solver: that test already passes `--solver-backend=dummy` itself, so
+injecting a second `--solver-backend` makes the option appear twice and KLEE's
+command line parser rejects it.
 
 ## What breaks on a modern system
 

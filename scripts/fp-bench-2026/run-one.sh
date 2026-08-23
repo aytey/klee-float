@@ -4,7 +4,7 @@
 #
 #   run-one.sh <config> <benchmark.bc>
 #
-# Configurations are named in SOLVER_CONFIGS below: "stp" plus one per Z3 build
+# Configurations: "stp", "bitwuzla", plus one per Z3 build
 # under test. KLEE is linked against the Z3 that scripts/build-2026.sh builds
 # (4.5.0); the other Z3 builds are swapped in at run time via LD_LIBRARY_PATH,
 # which works because KLEE only uses Z3's C API. Point Z3_<name>_LIB at a
@@ -41,7 +41,8 @@ Z3_z3_50_LIB=${Z3_50_LIB:-$HOME/clones/z3/master/build/libz3.so.5.0.0.0}
 Z3_z3_51_LIB=${Z3_51_LIB:-$HOME/clones/z3/master/build-gcc16-py311/libz3.so.5.1.0.0}
 
 case $CFG in
-  stp)    BACKEND=stp; LIB="" ;;
+  stp)      BACKEND=stp;      LIB="" ;;
+  bitwuzla) BACKEND=bitwuzla; LIB="" ;;
   z3-450) BACKEND=z3;  LIB=$Z3_z3_450_LIB ;;
   z3-415) BACKEND=z3;  LIB=$Z3_z3_415_LIB ;;
   z3-50)  BACKEND=z3;  LIB=$Z3_z3_50_LIB ;;

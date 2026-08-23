@@ -2,7 +2,7 @@
 
 This records how to rebuild the floating-point benchmark suite this branch was
 evaluated on, and how to run it across solver backends — specifically to compare
-the STP floating-point support added here against Z3.
+the STP and Bitwuzla floating-point support added here against Z3.
 
 The suite is the one from:
 
@@ -19,9 +19,9 @@ does not reproduce the paper's experiment.
 ## Quick start
 
 ```sh
-scripts/build-2026.sh                          # KLEE + LLVM 3.4 + Z3 + STP
+scripts/build-2026.sh                          # KLEE + LLVM 3.4 + Z3 + STP + Bitwuzla
 scripts/fp-bench-2026/fetch-and-build.sh       # the benchmark suite
-scripts/fp-bench-2026/run-all.sh               # 86 benchmarks x 5 solvers
+scripts/fp-bench-2026/run-all.sh               # 86 benchmarks x 6 solvers
 ```
 
 Everything lands in `$ROOT/fp-bench-2026` (override with `FP_BENCH_ROOT`);
@@ -83,9 +83,11 @@ miscompilation the paper reports having hit.
 the only thing differing between configurations is the solver:
 
 * **`--use-forked-solver=false`.** This is the important one. It defaults to
-  *on*, but `CoreSolver.cpp` only passes it to `STPSolver` — Z3 always runs
-  in-process. Left at the default, STP would fork a process per query and Z3
-  would not, which is not a like-for-like comparison.
+  *on*, but `CoreSolver.cpp` only passes it to `STPSolver` — Z3 and Bitwuzla
+  always run in-process. Left at the default, STP would fork a process per query
+  and the others would not, which is not a like-for-like comparison. It is not a
+  small effect: on the KLEE test suite STP spends 9.3s of solver time with
+  forking and 7.3s without.
 * **`--libc=uclibc`.** Without a libc these benchmarks cannot resolve `stdout`
   or `fprintf` and barely execute — `polyroots` runs 419 instructions without it
   and 5773 with it. `--posix-runtime` is not usable: their `main()` takes no
@@ -102,6 +104,8 @@ Z3 versions are swapped in at run time via `LD_LIBRARY_PATH`, pointing a
 and all versions tested pass the KLEE test suite identically. It is not a
 rebuild, so treat it as a strong indication rather than a controlled experiment.
 Point `Z3_415_LIB` / `Z3_50_LIB` / `Z3_51_LIB` elsewhere to test other builds.
+STP and Bitwuzla are whatever KLEE was linked against, since KLEE has a distinct
+backend for each rather than a swappable library.
 
 ## Reading the results
 
@@ -114,23 +118,29 @@ a normal halt, and bugs found versus each benchmark's specification.
 
 Results on this machine (86 benchmarks, 60s exploration budget, 8-way parallel):
 
-| Solver | Solver time | Queries | **ms/query** | Instructions | Killed |
+| Solver | Solver time | Queries | ms/query | Instructions | Killed |
 | --- | --- | --- | --- | --- | --- |
-| **STP master** | 1250s | 8176 | **153** | 1,531,880 | 7 |
+| **Bitwuzla 0.9.1-dev** | **1098s** | 6598 | 166 | 1,471,420 | 7 |
+| STP master | 1250s | 8176 | **153** | 1,531,880 | 7 |
 | Z3 4.5.0 | 1927s | 5276 | 365 | 1,360,846 | 6 |
 | Z3 4.15.0 | 2479s | 5934 | 418 | 1,175,596 | 6 |
 | Z3 5.0 | 2337s | 6170 | 379 | 1,191,061 | 7 |
 | Z3 5.1 | 2193s | 6132 | 358 | 1,164,937 | 8 |
 
-STP issued 55% more queries and covered more instructions in 35% less solver
-time — 2.3–2.7× cheaper per query. Restricted to the 72 benchmarks every
-configuration halted on, STP is 1.66× faster than Z3 4.5.0 and 1.84–2.10× faster
-than the 5.x builds. Consistently with the KLEE test suite, the newer Z3 builds
-are *slower* here than the 4.5.0 this branch pins.
+Restricted to the 72 benchmarks every configuration halted on — the closest to
+like-for-like this gets — Bitwuzla is fastest at 710s, STP 786s (1.11×),
+Z3 4.5.0 1307s (1.84×) and the 5.x builds 1449–1473s (2.0–2.1×).
 
-Bug-finding agrees across all five: 31 true positives and 3 missed, with seven
+Bitwuzla and STP are close and the ordering depends on the measure: STP is
+marginally cheaper per query (153 vs 166 ms) but issues more of them, so
+Bitwuzla spends less solver time overall. Both are far ahead of every Z3.
+Consistently with the KLEE test suite, the newer Z3 builds are *slower* here
+than the 4.5.0 this branch pins.
+
+Bug-finding agrees across all six: 31 true positives and 3 missed, with seven
 further errors reported by *every* configuration — solver-independent, so
-attributable to this 2026 environment rather than any backend.
+attributable to this 2026 environment rather than any backend. STP additionally
+reports `atof`, discussed below.
 
 ### The `atof` result
 
@@ -154,6 +164,7 @@ overwrites `input[0]='0'` and `input[1]='.'`, spell `0.2e+1`; `atof` returns
 overlooks exponent notation.
 
 STP found it purely by getting further within the budget: on that benchmark it
-issued **685 queries in 60s where Z3 5.0 and 5.1 managed 3**. The lesson for
-anyone re-running this is that an unexpected error against a spec is worth
-replaying natively before it is believed — in either direction.
+issued **685 queries in 60s where Z3 5.0 and 5.1 managed 3**. Bitwuzla does not
+reach it either, for the same reason. The lesson for anyone re-running this is
+that an unexpected error against a spec is worth replaying natively before it is
+believed — in either direction.
