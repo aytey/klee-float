@@ -209,6 +209,45 @@ Three query difficulty regimes, then, and they do not agree:
 | fp-bench, completing | ~100 ms/query | Bitwuzla ~1.6× faster |
 | fp-bench, budget-bound | hardest | STP ~34% more queries in the same time |
 
+### Where STP's remaining gap actually is
+
+Two candidate explanations were measured and ruled out, which leaves one.
+
+**Not KLEE's integration.** `STPBuilder` clears its construct cache after every
+top-level `construct()`, whereas the Z3 and Bitwuzla builders share terms across
+a whole query — so STP rebuilt subexpressions shared between a query's
+constraints once per constraint, doing 231 constructions per query against
+Bitwuzla's 106. Giving `STPBuilder` the same `autoClearConstructCache` flag
+brought that to 105, exactly in line. Solver time did not improve
+(−3.0%, inside the noise band), so the redundant construction was real but
+cheap. The change was reverted; it is recorded here so the experiment is not
+repeated.
+
+**Not the SAT backend.** See above — CaDiCaL and CryptoMiniSat were both
+measured and neither beats MiniSat for STP here.
+
+**It is the floating-point theory.** Splitting the identically-explored test
+suite by whether a test uses floating point (9 repetitions each, medians):
+
+| Subset | STP+MiniSat | Bitwuzla | ratio | queries |
+| --- | --- | --- | --- | --- |
+| floating point (66 tests) | 2.56s | **2.12s** | 1.21× | 524 / 526 |
+| bitvector only (172 tests) | **4.59s** | 5.26s | 0.87× | 1047 / 1043 |
+| all (238 tests) | 7.13s | 7.36s | 0.97× | 1571 / 1569 |
+
+**STP is already faster than Bitwuzla on bitvector-only queries** — faster in 73
+of 81 run pairings — and slower only on floating-point ones, where it loses 80
+of 81 pairings. The two effects roughly cancel over the whole suite, which is
+why the aggregate looked like a tie.
+
+So the work needed to make STP win outright is in its floating-point layer, not
+in KLEE, not in the SAT solver, and not in bitvector reasoning. The gap also
+widens with query difficulty — 1.21× on the test suite's small queries against
+about 1.6× on the fp-bench benchmarks that run to completion — which points at
+what reaches the bit-blaster (word-level rewriting and the size of the blasted
+FP circuits) rather than at a constant overhead. STP's floating-point support is
+also far younger than Bitwuzla's SymFPU integration, so there is likely room.
+
 ### How much of this is noise?
 
 Enough to have misled an earlier version of this document, which claimed STP was
