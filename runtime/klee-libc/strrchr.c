@@ -9,6 +9,13 @@
 
 #include <string.h>
 
+/* Modern glibc turns on its ISO C23 extensions under _GNU_SOURCE, and under
+   C23 <string.h> defines strrchr() as a _Generic macro.  We are defining the
+   function itself, so drop the macro first. */
+#ifdef strrchr
+#undef strrchr
+#endif
+
 char *strrchr(const char *t, int c) {
   char ch;
   const char *l=0;

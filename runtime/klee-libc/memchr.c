@@ -36,6 +36,13 @@
 
 #include <string.h>
 
+/* Modern glibc turns on its ISO C23 extensions under _GNU_SOURCE, and under
+   C23 <string.h> defines memchr() as a _Generic macro.  We are defining the
+   function itself, so drop the macro first. */
+#ifdef memchr
+#undef memchr
+#endif
+
 void *
 memchr(s, c, n)
 	const void *s;
