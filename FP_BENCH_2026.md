@@ -127,20 +127,50 @@ Results on this machine (86 benchmarks, 60s exploration budget, 8-way parallel):
 | Z3 5.0 | 2337s | 6170 | 379 | 1,191,061 | 7 |
 | Z3 5.1 | 2193s | 6132 | 358 | 1,164,937 | 8 |
 
-Restricted to the 72 benchmarks every configuration halted on — the closest to
-like-for-like this gets — Bitwuzla is fastest at 710s, STP 786s (1.11×),
-Z3 4.5.0 1307s (1.84×) and the 5.x builds 1449–1473s (2.0–2.1×).
+Restricted to the 72 benchmarks every configuration halted on, Bitwuzla totals
+710s, STP 786s, Z3 4.5.0 1307s and the 5.x builds 1449–1473s.
 
-Bitwuzla and STP are close and the ordering depends on the measure: STP is
-marginally cheaper per query (153 vs 166 ms) but issues more of them, so
-Bitwuzla spends less solver time overall. Both are far ahead of every Z3.
-Consistently with the KLEE test suite, the newer Z3 builds are *slower* here
-than the 4.5.0 this branch pins.
+**Do not read the totals as "Bitwuzla is faster than STP".** Under this design
+the configurations do not execute the same work, and here they never do: of the
+86 benchmarks, **zero** have identical instruction counts across the backends —
+not even among the 59 that every backend finished well inside the budget. KLEE
+concretises symbolic arguments to external calls and *constrains* them to the
+value the solver picked, so a different model prunes the state space
+differently, and the divergence compounds. On top of that, 33 of the 86 are
+budget-bounded for at least one backend, where a faster solver simply walks
+further into the program.
+
+That is what the query counts reflect: STP issued 8176 queries to Bitwuzla's
+6598 because it explored further (1,531,880 instructions against 1,471,420),
+not because it needs more queries per unit of work. See "Comparing solvers
+fairly" below.
 
 Bug-finding agrees across all six: 31 true positives and 3 missed, with seven
 further errors reported by *every* configuration — solver-independent, so
 attributable to this 2026 environment rather than any backend. STP additionally
 reports `atof`, discussed below.
+
+### Comparing solvers fairly
+
+Because fp-bench exploration always diverges, the KLEE test suite is the better
+instrument for a like-for-like solver comparison: **252 of its 260 tests explore
+identically** across Z3, STP and Bitwuzla. On exactly those tests, with
+`--use-forked-solver=false` throughout:
+
+| Solver | Queries | Solver time | ms/query |
+| --- | --- | --- | --- |
+| STP master | 1650 | **7.07s** | **4.3** |
+| Bitwuzla 0.9.1-dev | 1656 | 7.62s | 4.6 |
+| Z3 4.5.0 | 1650 | 31.35s | 19.0 |
+
+Identical work, and the query counts agree to within 0.4% — the six-query
+difference comes from eight tests where a different model changes what the
+counterexample cache can reuse. So there is no query-issuance inefficiency in
+any backend to tune away; the only real lever is cost per query, and on equal
+work **STP is about 7% ahead of Bitwuzla**, with both roughly 4× ahead of Z3.
+
+The reversal against the fp-bench totals is exactly the fixed-budget effect: a
+faster solver does more work, and doing more work costs more solver time.
 
 ### The `atof` result
 
