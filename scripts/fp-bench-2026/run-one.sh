@@ -76,6 +76,15 @@ case $CFG in
                  EXTRA="-stp-incremental-engage-at=32" ;;
   stp-new-at128) BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
                  EXTRA="-stp-incremental-engage-at=128" ;;
+  # Fixed ordinal versus measuring both modes and choosing.
+  stp-fixed32)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-adapt-incremental=false -stp-incremental-engage-at=32" ;;
+  stp-adapt8)    BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-adapt-incremental=true -stp-incremental-engage-at=8" ;;
+  stp-adapt16)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-adapt-incremental=true -stp-incremental-engage-at=16" ;;
+  stp-adapt32)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-adapt-incremental=true -stp-incremental-engage-at=32" ;;
   stp-new-at16)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
                  EXTRA="-stp-incremental-engage-at=16" ;;
   stp-new-at24)  BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4

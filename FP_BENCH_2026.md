@@ -593,7 +593,55 @@ the ten worst account for 127s of the 140s it gives away:
 
 Two different problems are mixed together there. `libmatheval_sym_f` and
 `sparse_matrices_klee_bug` are the threshold mis-assigning a session -- both
-want batch and both have more than 32 queries, so an adaptive policy would
-take them. The `nan_*` and `sqr_longdouble` rows are a real solver gap on
-fp80 and binary64: seventeen to twenty times, on queries that are about NaN
-propagation and about `sqrt(x*x)`.
+want batch and both have more than 32 queries. The `nan_*` and
+`sqr_longdouble` rows are a real solver gap on fp80 and binary64: seventeen
+to twenty times, on queries that are about NaN propagation and about
+`sqrt(x*x)`.
+
+The first of those is fixed below. The second is not, and is the thing to
+pick up next.
+
+## Measuring the choice instead of guessing it
+
+A fixed ordinal has to guess which sessions want the driver, and it guesses
+wrong often: `libmatheval_sym_f` has 69 queries and wants batch, while
+`sqr_longdouble-flow` has 6 and wants the driver. Nothing about a session
+that is visible before it runs predicts the answer.
+
+So `--stp-adapt-incremental` (on by default) measures it. The first
+`--stp-incremental-engage-at` queries run on the batch pipeline and their
+mean cost is the baseline; the driver is then engaged and its own mean
+compared against it. If the driver is more than `--stp-adapt-regret` times
+slower per query it is abandoned for the rest of the session, after as few as
+four engaged queries.
+
+There is deliberately no matching decision to *keep* it. An early version
+settled on the driver once it had run as many queries as the baseline had,
+and on `sparse_matrices_klee_bug` that fired on the fourth engaged query and
+kept a driver that then ran five times slower for the next nine hundred:
+45.5s against 8.4s. Staying unsettled costs nothing, because the means keep
+accumulating and the abandon test can still fire much later.
+
+With the decision revisitable, the engagement point drops from 32 to **8** --
+it is no longer a commitment, just where the measuring starts.
+
+Three interleaved passes, 76 benchmarks every configuration ran to a normal
+halt in all three:
+
+| configuration | pass p | pass q | pass r | median | range |
+| --- | --- | --- | --- | --- | --- |
+| STP, engage at 3 (before any of this) | 898.5 | 890.6 | 910.2 | **898.5s** | 891–910 |
+| Bitwuzla | 806.9 | 809.0 | 811.8 | **809.0s** | 807–812 |
+| STP, fixed ordinal 32 | 792.5 | 791.2 | 797.2 | **792.5s** | 791–797 |
+| STP, adaptive from 32 | 766.7 | 780.9 | 798.3 | 780.9s | 767–798 |
+| **STP, adaptive from 8** | 743.7 | 741.8 | 742.3 | **742.3s** | **742–744** |
+
+**STP is 8.3% faster than Bitwuzla, and 17.4% faster than it was**, with
+ranges that do not overlap either comparison.
+
+It also finds more. Every adaptive run reports **32 true positives and 2
+missed** against Bitwuzla's 31 and 3 -- one more real, specified bug, in all
+three passes, because it gets further inside the same budget. The extra
+unexpected report is the `atof` true positive documented above.
+
+KLEE's own suite: 278 passed, 0 failed.

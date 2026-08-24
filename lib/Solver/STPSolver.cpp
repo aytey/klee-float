@@ -60,26 +60,41 @@ llvm::cl::opt<bool> DebugDumpSTPQueries(
 // sort_smallest_klee -- so what this really selects is which sessions get
 // which, and the number of queries alone does not predict the winner.
 //
-// Thirty-two, which is the threshold STP's own sweep chose for pure
-// bit-vector sessions and which it withholds from embedders only because the
-// C API cannot see a set-logic. Measured over fp-bench, three interleaved
-// passes, on the 78 benchmarks every configuration ran to a normal halt:
-//
-//   Bitwuzla                     1026.0s  (989-1030)
-//   STP, engage at 32             942.5s  (941-968)
-//   STP, engage at 48             952.0s  (931-972)
-//   STP, engage at 3 (STP-s own) 1006.8s
-//
-// Ranges do not overlap: this is what puts STP 8% ahead of Bitwuzla on the
-// suite, where before it was level. Bugs found are identical under every
-// setting, so nothing here changes what KLEE decides -- only how long it
-// takes. 48 is indistinguishable; 32 has the better median and is the value
-// STP already believes in.
+// Eight, which under the adaptive policy below is not a decision but the
+// point at which the measuring starts: eight batch queries are the baseline,
+// and the driver is tried against it from the ninth. A fixed ordinal wants a
+// much larger number (32 measured best) precisely because it cannot take the
+// decision back.
 llvm::cl::opt<int> STPIncrementalEngageAt(
-    "stp-incremental-engage-at", llvm::cl::init(32),
+    "stp-incremental-engage-at", llvm::cl::init(8),
     llvm::cl::desc("Query ordinal at which STP's incremental driver takes "
                    "over: 0 never (default), N on the Nth query, -1 to leave "
                    "STP's own policy alone"));
+
+// Decide the incremental question by measurement instead of by ordinal.
+//
+// A fixed threshold has to guess, and the guess is wrong often: over fp-bench
+// `libmatheval_sym_f` has 69 queries and wants the batch pipeline, while
+// `sqr_longdouble-flow` has 6 and wants the driver. Picking correctly per
+// session is worth about 13% over the best fixed ordinal, and no property of
+// the session available up front predicts it.
+//
+// So: spend the first --stp-incremental-engage-at queries on the batch
+// pipeline and remember what they cost, then engage the driver and keep
+// comparing. If it turns out to be much worse, disengage for good; if it
+// survives a full probe, keep it for good. The comparison is between means
+// over different queries, which is crude -- but what it has to separate are
+// three- to six-fold differences, and it only has to be right about the sign.
+llvm::cl::opt<bool> STPAdaptIncremental(
+    "stp-adapt-incremental", llvm::cl::init(true),
+    llvm::cl::desc("Choose between STP's batch and incremental modes by "
+                   "measuring both, rather than by a fixed query ordinal "
+                   "(default=on)"));
+
+llvm::cl::opt<double> STPAdaptRegret(
+    "stp-adapt-regret", llvm::cl::init(2.0),
+    llvm::cl::desc("How much slower per query the incremental driver may be "
+                   "before it is abandoned (default=2.0)"));
 
 llvm::cl::opt<bool> DebugSTPPhaseTiming(
     "debug-stp-phase-timing", llvm::cl::init(false),
@@ -153,6 +168,19 @@ private:
   bool useForkedSTP;
   SolverRunStatus runStatusCode;
 
+  // Adaptive mode selection; see STPAdaptIncremental.
+  size_t queriesRun;
+  double batchSeconds, incrementalSeconds;
+  size_t batchQueries, incrementalQueries;
+  bool incrementalEngaged;  // what STP was last told
+  bool modeSettled;         // stop probing: the decision is made
+
+  // Whether this query should be handed to the incremental driver, and
+  // telling STP so.
+  void selectMode();
+  // Fold one query's cost into whichever mode ran it, and revisit.
+  void recordQueryCost(double seconds);
+
 public:
   STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides = true);
   ~STPSolverImpl();
@@ -172,7 +200,10 @@ public:
 STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
     : vc(vc_createValidityChecker()),
       builder(new STPBuilder(vc, _optimizeDivides)), timeout(0.0),
-      useForkedSTP(_useForkedSTP), runStatusCode(SOLVER_RUN_STATUS_FAILURE) {
+      useForkedSTP(_useForkedSTP), runStatusCode(SOLVER_RUN_STATUS_FAILURE),
+      queriesRun(0), batchSeconds(0.0), incrementalSeconds(0.0),
+      batchQueries(0), incrementalQueries(0), incrementalEngaged(false),
+      modeSettled(false) {
   assert(vc && "unable to create validity checker");
   assert(builder && "unable to create STPBuilder");
 
@@ -184,10 +215,14 @@ STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
   // we restore the old behaviour.
   vc_setInterfaceFlags(vc, EXPRDELETE, 0);
 
-  // See STPIncrementalEngageAt above; negative leaves STP's own policy alone.
+  // See STPIncrementalEngageAt above; negative leaves STP's own policy
+  // alone. Under the adaptive policy selectMode() drives this per query
+  // instead, starting from the batch pipeline.
   if (STPIncrementalEngageAt >= 0)
     vc_setInterfaceFlags(vc, INCREMENTAL_AUTO_ENGAGE_AT,
-                         STPIncrementalEngageAt.getValue());
+                         STPAdaptIncremental
+                             ? 0
+                             : STPIncrementalEngageAt.getValue());
 
   if (STPBVAbstractionWidth > 0) {
     vc_setInterfaceFlags(vc, BV_ABSTRACTION_WIDTH,
@@ -433,6 +468,90 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
     }
   }
 }
+// Which mode this query runs in.
+//
+// The batch phase comes first because it is the safe one: it is the classic
+// pipeline, it is what a session of two or three queries should be getting
+// anyway, and its cost is the baseline everything else is compared against.
+void STPSolverImpl::selectMode() {
+  if (!STPAdaptIncremental) {
+    // Fixed policy: whatever the ordinal says, set once and left alone.
+    return;
+  }
+
+  bool wantIncremental;
+  if (modeSettled) {
+    wantIncremental = incrementalEngaged;
+  } else if (STPIncrementalEngageAt <= 0) {
+    wantIncremental = false;  // never engage, so nothing to measure
+  } else {
+    wantIncremental = queriesRun >= (size_t)STPIncrementalEngageAt;
+  }
+
+  if (wantIncremental != incrementalEngaged || queriesRun == 0) {
+    // 1 engages from the next query, 0 prevents automatic engagement. The
+    // flag is read per query, so this is a switch and not a one-off.
+    vc_setInterfaceFlags(vc, INCREMENTAL_AUTO_ENGAGE_AT,
+                         wantIncremental ? 1 : 0);
+    incrementalEngaged = wantIncremental;
+  }
+}
+
+// Fold this query's cost into whichever mode ran it, and decide whether to
+// keep going.
+//
+// Two ways to settle. The driver is abandoned as soon as it is clearly
+// losing -- four queries is enough to see a threefold difference and few
+// enough not to have paid much for it -- and it is adopted for good once it
+// has matched the batch phase over a probe as long as the batch phase was.
+// A session that ends before either is a session where the ordinal decided,
+// which is the behaviour this replaced.
+void STPSolverImpl::recordQueryCost(double seconds) {
+  queriesRun++;
+  if (!STPAdaptIncremental || modeSettled)
+    return;
+
+  if (incrementalEngaged) {
+    incrementalSeconds += seconds;
+    incrementalQueries++;
+  } else {
+    batchSeconds += seconds;
+    batchQueries++;
+  }
+
+  // A baseline of one or two queries is not a baseline: KLEE's opening
+  // queries are often trivial, and a mean taken over them would condemn the
+  // driver for being slower than nothing.
+  if (batchQueries < 4 || incrementalQueries == 0)
+    return;
+
+  const double batchMean = batchSeconds / (double)batchQueries;
+  const double incMean = incrementalSeconds / (double)incrementalQueries;
+
+  // Nothing to tell apart while both are noise. Comparing means of
+  // sub-millisecond queries would settle the mode on scheduling jitter.
+  if (batchMean < 1e-3 && incMean < 1e-3)
+    return;
+
+  if (incrementalQueries >= 4 && incMean > STPAdaptRegret * batchMean) {
+    modeSettled = true;
+    incrementalEngaged = false;
+    vc_setInterfaceFlags(vc, INCREMENTAL_AUTO_ENGAGE_AT, 0);
+    if (DebugSTPPhaseTiming)
+      klee_warning("STP: abandoning the incremental driver after %zu queries "
+                   "(%.1fms/query against %.1fms batch)",
+                   incrementalQueries, incMean * 1000.0, batchMean * 1000.0);
+    return;
+  }
+
+  // There is deliberately no matching "keep it for good". Settling on the
+  // driver after a short probe locks in whatever the first few queries
+  // happened to cost -- with a four-query baseline that fired on the fourth
+  // engaged query and kept the driver on a session that ran five times
+  // slower for the next nine hundred. Staying unsettled costs nothing: the
+  // means keep accumulating, and the test above can still fire much later.
+}
+
 bool STPSolverImpl::computeInitialValues(
     const Query &query, const std::vector<const Array *> &objects,
     std::vector<std::vector<unsigned char> > &values, bool &hasSolution) {
@@ -451,6 +570,7 @@ bool STPSolverImpl::computeInitialValues(
   ++stats::queryCounterexamples;
 
   struct timeval phase0, phase1, phase2;
+  selectMode();
   gettimeofday(&phase0, NULL);
   ExprHandle stp_e = builder->construct(query.expr);
 
@@ -503,11 +623,12 @@ bool STPSolverImpl::computeInitialValues(
       ++stats::queriesValid;
   }
 
-  if (DebugSTPPhaseTiming) {
-    gettimeofday(&phase2, NULL);
-    klee_warning("STP query: build+assert %ldms, solve+cex %ldms",
-                 elapsedMillis(phase0, phase1), elapsedMillis(phase1, phase2));
-  }
+  gettimeofday(&phase2, NULL);
+  if (DebugSTPPhaseTiming)
+    klee_warning("STP query: build+assert %ldms, solve+cex %ldms%s",
+                 elapsedMillis(phase0, phase1), elapsedMillis(phase1, phase2),
+                 incrementalEngaged ? " [incremental]" : " [batch]");
+  recordQueryCost(elapsedMillis(phase1, phase2) / 1000.0);
 
   vc_pop(vc);
 
