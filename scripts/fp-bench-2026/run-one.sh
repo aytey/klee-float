@@ -81,6 +81,15 @@ case $CFG in
                  EXTRA="-stp-adapt-incremental=false -stp-incremental-engage-at=32" ;;
   stp-adapt8)    BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
                  EXTRA="-stp-adapt-incremental=true -stp-incremental-engage-at=8" ;;
+  # ... and the same with STP spending less effort shrinking the CNF, which
+  # is what the wide-significand square roots want and what search-bound
+  # queries do not.
+  stp-cnf0)      BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-cnf-effort=0" ;;
+  stp-cnf1)      BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-cnf-effort=1" ;;
+  stp-cnf3)      BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
+                 EXTRA="-stp-cnf-effort=3" ;;
   stp-adapt16)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4
                  EXTRA="-stp-adapt-incremental=true -stp-incremental-engage-at=16" ;;
   stp-adapt32)   BACKEND=stp; LIB=$STP_stp_new_LIB; SONAME=libstp.so.2.4

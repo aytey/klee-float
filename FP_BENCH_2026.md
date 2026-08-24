@@ -644,4 +644,55 @@ missed** against Bitwuzla's 31 and 3 -- one more real, specified bug, in all
 three passes, because it gets further inside the same budget. The extra
 unexpected report is the `atof` true positive documented above.
 
-KLEE's own suite: 278 passed, 0 failed.
+KLEE's own suite: 278 passed, 0 failed. And the shipped defaults, with no
+flags passed at all, reproduce it: 851.9s against Bitwuzla's 934.4s on the
+77 benchmarks of that run, 32 true positives against 31.
+
+### Measured and not taken: the CNF generator's effort level
+
+The same shape of problem turns up one level down. STP's CNF generator has
+five effort levels, and how hard it works is a trade rather than a quality
+dial: on `nan_double` one query spent **983ms of its 1.28s in cut
+enumeration and none at all in the SAT solver**, so the whole benchmark
+halves at the low end, while `vectors_klee` is 6.9s at high effort against
+15.7s at very low.
+
+An embedder could not reach the level at all -- it was a command-line option
+with no C API -- so STP now has `CNF_GENERATION_EFFORT` and KLEE has
+`--stp-cnf-effort`. On the six benchmarks where the circuit is the cost
+rather than the search, the low end is worth 35% (68.5s to 44.4s).
+
+Over the whole suite it is a wash: 762.6s at very low against 771.8s at the
+default, because what it wins on the circuit-bound queries it gives back on
+the search-bound ones. **So the default is unchanged.** The level wants
+choosing per query, the same way the incremental mode does; the adaptive
+machinery above is the obvious place to do it, and that has not been tried.
+
+Also measured and worth recording as a warning: `--aig-rewrite-passes=3`
+looked promising on a small sample and is catastrophic here -- 704.8s
+against 68.5s on those six benchmarks, almost all of it on `nan_double` and
+`rounding_sqrt_klee_bug`.
+
+### Still open
+
+After all of this STP is faster on 40 of 76 benchmarks and slower on 32, and
+what it gives away is concentrated: five benchmarks are 70s of the 85s.
+
+| benchmark | STP | Bitwuzla |
+| --- | --- | --- |
+| `sqr_longdouble-flow` | 24.7s | 5.1s |
+| `gmp_klee_mul` | 23.3s | 8.2s |
+| `sqr_longdouble-noflow` | 16.0s | 1.0s |
+| `rounding_sqrt_klee_bug` | 14.1s | 3.7s |
+| `nan_longdouble` | 10.5s | 0.6s |
+
+All five are fp80 or binary64 `sqrt` and `mul`, and Bitwuzla's advantage on
+them is its bit-vector abstraction: with `--bitwuzla-abstraction=false` it
+takes 7.2s on `sqr_longdouble-noflow` against 1.1s, and 104.6s on
+`sqr_longdouble-flow` against 5.0s -- on the second of those it becomes nine
+times slower than STP. STP has that machinery and it makes the same
+benchmarks four to five times worse, because it abstracts 40 to 59
+multiplies per query and escalates essentially all of them to the exact
+circuit anyway, after 67 to 92 full SAT re-solves. That is the next thing to
+look at, and it should be measured against a corpus drawn from these five
+benchmarks rather than from a binary32 one.

@@ -96,6 +96,22 @@ llvm::cl::opt<double> STPAdaptRegret(
     llvm::cl::desc("How much slower per query the incremental driver may be "
                    "before it is abandoned (default=2.0)"));
 
+// How hard STP works to shrink the CNF before handing it to the SAT solver.
+//
+// It is a trade, not a quality dial, and floating-point queries sit on both
+// sides of it. A `sqrt` over a wide significand builds an enormous circuit
+// that the SAT solver then disposes of immediately: on nan_double one query
+// spent 983ms of its 1.28s in cut enumeration and none at all in search, and
+// the whole benchmark halves at the low end. Queries whose search is the
+// expensive part want the opposite -- vectors_klee is 6.9s at high effort
+// against 15.7s at very low.
+//
+// -1 leaves STP's own default (medium) alone.
+llvm::cl::opt<int> STPCNFEffort(
+    "stp-cnf-effort", llvm::cl::init(-1),
+    llvm::cl::desc("Effort STP spends minimising the CNF: 0 very low .. 4 "
+                   "very high (default=-1, leave STP's own default alone)"));
+
 llvm::cl::opt<bool> DebugSTPPhaseTiming(
     "debug-stp-phase-timing", llvm::cl::init(false),
     llvm::cl::desc("Report per-query build/assert and solve times for STP "
@@ -233,6 +249,9 @@ STPSolverImpl::STPSolverImpl(bool _useForkedSTP, bool _optimizeDivides)
       vc_setInterfaceFlags(vc, BV_TERM_ABSTRACTION_VALUE_DIVISOR,
                            (int)STPBVAbstractionValueDivisor.getValue());
   }
+
+  if (STPCNFEffort >= 0)
+    vc_setInterfaceFlags(vc, CNF_GENERATION_EFFORT, STPCNFEffort.getValue());
 
   make_division_total(vc);
 
